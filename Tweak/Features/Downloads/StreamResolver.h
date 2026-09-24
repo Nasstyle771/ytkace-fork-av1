@@ -19,6 +19,10 @@ NS_ASSUME_NONNULL_BEGIN
 @property(nonatomic, assign, getter=isAdaptive) BOOL adaptive;
 @property(nonatomic, assign, getter=isDefaultAudio) BOOL defaultAudio;
 @property(nonatomic, strong) id rawFormat;
+@property(nonatomic, assign, readonly) BOOL isAV1;
+@property(nonatomic, assign, readonly) BOOL isVP9;
+@property(nonatomic, assign, readonly) BOOL isH264;
+@property(nonatomic, copy) NSString *codecLabel;
 @end
 
 @interface YTKACEStreamResolver : NSObject

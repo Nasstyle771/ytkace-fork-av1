@@ -23,6 +23,7 @@ BOOL YTKACEQueueOwnsCurrentVideo(void);
 NSString * _Nullable YTKACELastVideoID(void);
 void YTKACEInstallGlobalDownloadMiniPlayer(void);
 void YTKACEInstallOLEDHooks(void);
+void YTKACEInstallDisplayRateHooks(void);
 void YTKACEInstallStartupHooks(void);
 void YTKACEInstallPremiumLogoHooks(void);
 void YTKACEInstallBackgroundPlaybackHooks(void);

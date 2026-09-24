@@ -5,11 +5,13 @@
 
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
+#import <string.h>
 
 static NSMutableDictionary<NSString *, NSValue *> *YTKACEOLEDOriginals;
 static IMP OriginalQualitySheetDidAppear;
 static IMP OriginalAppTraitChanged;
 static IMP OriginalAppStatusBarStyle;
+static IMP OriginalPivotBarItemSelect;
 
 static NSValue *YTKACEOLEDValue(IMP implementation) {
     return [NSValue value:&implementation withObjCType:@encode(IMP)];
@@ -30,6 +32,22 @@ static NSString *YTKACEOLEDOriginalKey(id receiver, SEL selector) {
             NSStringFromSelector(selector)];
 }
 
+static BOOL YTKACEIsSurfaceSelector(SEL selector) {
+    const char *name = sel_getName(selector);
+    if (name == NULL) return NO;
+    return (strstr(name, "menu") != NULL ||
+            strstr(name, "dialog") != NULL ||
+            strstr(name, "elevated") != NULL ||
+            strstr(name, "raised") != NULL ||
+            strstr(name, "Surface") != NULL ||
+            strstr(name, "Container") != NULL ||
+            strstr(name, "chip") != NULL ||
+            strstr(name, "overlay") != NULL ||
+            strstr(name, "Secondary") != NULL ||
+            strstr(name, "background2") != NULL ||
+            strstr(name, "background3") != NULL);
+}
+
 static UIColor *YTKACEOLEDColor(id receiver, SEL selector) {
     IMP original = YTKACEOLEDImplementation(
         YTKACEOLEDOriginals[YTKACEOLEDOriginalKey(receiver, selector)]
@@ -37,10 +55,13 @@ static UIColor *YTKACEOLEDColor(id receiver, SEL selector) {
     UIColor *base = original == NULL
         ? nil
         : ((id (*)(id, SEL))original)(receiver, selector);
-    if (!YTKACEFeatureEnabled(YTKACEOLEDKey)) return base;
+    if (!YTKACEOLEDActive(nil)) return base;
     __weak id weakReceiver = receiver;
+    BOOL isSurface = YTKACEIsSurfaceSelector(selector);
     return [UIColor colorWithDynamicProvider:^UIColor *(UITraitCollection *traits) {
-        if (YTKACEOLEDActive(traits)) return UIColor.blackColor;
+        if (YTKACEOLEDActive(traits)) {
+            return isSurface ? YTKACEThemeSurfaceColor(traits) : YTKACEThemeBackgroundColor(traits);
+        }
         id target = weakReceiver;
         UIColor *current = target == nil || original == NULL
             ? base
@@ -49,6 +70,20 @@ static UIColor *YTKACEOLEDColor(id receiver, SEL selector) {
             resolvedColorWithTraitCollection:traits]
             : [current resolvedColorWithTraitCollection:traits];
     }];
+}
+
+static UIColor *YTKACEAccentColorHook(id receiver, SEL selector) {
+    id presetVal = YTKACEPreferenceObject(YTKACEAccentPresetKey);
+    NSInteger preset = [presetVal respondsToSelector:@selector(integerValue)] ? [presetVal integerValue] : 0;
+    if (preset > 0) {
+        return [UIColor colorWithDynamicProvider:^UIColor *(UITraitCollection *traits) {
+            return YTKACEAppAccentColorForTraits(traits);
+        }];
+    }
+    IMP original = YTKACEOLEDImplementation(
+        YTKACEOLEDOriginals[YTKACEOLEDOriginalKey(receiver, selector)]
+    );
+    return original == NULL ? YTKACEAppAccentColor() : ((id (*)(id, SEL))original)(receiver, selector);
 }
 
 static void YTKACERefreshStatusBars(UIViewController *controller) {
@@ -67,12 +102,27 @@ static NSInteger YTKACEAppStatusBarStyle(UIViewController *receiver,
     NSInteger original = OriginalAppStatusBarStyle == NULL
         ? UIStatusBarStyleDefault
         : ((NSInteger (*)(id, SEL))OriginalAppStatusBarStyle)(receiver, selector);
-    if (!YTKACEFeatureEnabled(YTKACEOLEDKey)) return original;
+    if (!YTKACEOLEDActive(receiver.traitCollection)) return original;
     UIUserInterfaceStyle style = receiver.traitCollection.userInterfaceStyle;
     NSInteger result = style == UIUserInterfaceStyleDark
         ? UIStatusBarStyleLightContent
         : UIStatusBarStyleDarkContent;
     return result;
+}
+
+static void YTKACERefreshAllThemeViews(void) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
+            if (![scene isKindOfClass:UIWindowScene.class] ||
+                scene.activationState != UISceneActivationStateForegroundActive) continue;
+            for (UIWindow *window in ((UIWindowScene *)scene).windows) {
+                YTKACERefreshStatusBars(window.rootViewController);
+                [window setNeedsLayout];
+                [window layoutIfNeeded];
+            }
+        }
+        YTKACERefreshNavigationAppearance();
+    });
 }
 
 static void YTKACEAppTraitChanged(UIViewController *receiver,
@@ -84,21 +134,11 @@ static void YTKACEAppTraitChanged(UIViewController *receiver,
     if (previous != nil &&
         ![receiver.traitCollection
             hasDifferentColorAppearanceComparedToTraitCollection:previous]) return;
-    if (!YTKACEFeatureEnabled(YTKACEOLEDKey)) return;
+    if (!YTKACEOLEDActive(receiver.traitCollection)) return;
     [receiver setNeedsStatusBarAppearanceUpdate];
     [receiver.view setNeedsLayout];
     YTKACERefreshNavigationAppearance();
-    dispatch_async(dispatch_get_main_queue(), ^{
-        for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
-            if (![scene isKindOfClass:UIWindowScene.class] ||
-                scene.activationState != UISceneActivationStateForegroundActive) continue;
-            for (UIWindow *window in ((UIWindowScene *)scene).windows) {
-                YTKACERefreshStatusBars(window.rootViewController);
-                [window setNeedsLayout];
-            }
-        }
-        YTKACERefreshNavigationAppearance();
-    });
+    YTKACERefreshAllThemeViews();
 }
 
 static void YTKACEInstallColorHook(NSString *className,
@@ -113,6 +153,31 @@ static void YTKACEInstallColorHook(NSString *className,
         : YTKACEInstallInstanceHook(className,
                                    selectorName,
                                    (IMP)YTKACEOLEDColor,
+                                   &original);
+    if (!installed || original == NULL) {
+        return;
+    }
+    NSString *key = [NSString stringWithFormat:@"%@|%@|%@",
+                     classMethod ? @"+" : @"-",
+                     className,
+                     selectorName];
+    if (YTKACEOLEDOriginals[key] == nil) {
+        YTKACEOLEDOriginals[key] = YTKACEOLEDValue(original);
+    }
+}
+
+static void YTKACEInstallAccentHook(NSString *className,
+                                    NSString *selectorName,
+                                    BOOL classMethod) {
+    IMP original = NULL;
+    BOOL installed = classMethod
+        ? YTKACEInstallClassHook(className,
+                                selectorName,
+                                (IMP)YTKACEAccentColorHook,
+                                &original)
+        : YTKACEInstallInstanceHook(className,
+                                   selectorName,
+                                   (IMP)YTKACEAccentColorHook,
                                    &original);
     if (!installed || original == NULL) {
         return;
@@ -161,16 +226,18 @@ static UIView *YTKACECommonAncestor(NSArray<UIView *> *views, UIView *limit) {
 }
 
 static void YTKACEBlackenQualitySurface(UIView *view) {
+    UIColor *surfaceColor = YTKACEThemeSurfaceColor(view.traitCollection);
+    UIColor *bgColor = YTKACEThemeBackgroundColor(view.traitCollection);
     if ([view isKindOfClass:UIVisualEffectView.class]) {
         UIVisualEffectView *effect = (UIVisualEffectView *)view;
         effect.effect = nil;
-        effect.contentView.backgroundColor = UIColor.blackColor;
+        effect.contentView.backgroundColor = surfaceColor;
     }
     UIColor *background = view.backgroundColor;
     CGFloat alpha = background == nil ? 0.0 : CGColorGetAlpha(background.CGColor);
     if (alpha > 0.01 || [view isKindOfClass:UITableView.class] ||
         [view isKindOfClass:UICollectionView.class]) {
-        view.backgroundColor = UIColor.blackColor;
+        view.backgroundColor = surfaceColor;
     }
     if ([view isKindOfClass:UILabel.class]) {
         ((UILabel *)view).textColor = UIColor.whiteColor;
@@ -210,16 +277,39 @@ static void YTKACEQualitySheetDidAppear(id receiver, SEL selector, BOOL animated
             }
         }
         if (surface != nil && surface != root) {
-            surface.backgroundColor = UIColor.blackColor;
+            surface.backgroundColor = YTKACEThemeSurfaceColor(root.traitCollection);
             YTKACEBlackenQualitySurface(surface);
         }
     });
+}
+
+static void YTKACEPivotBarItemSetSelected(UIView *receiver, SEL selector, BOOL selected) {
+    if (OriginalPivotBarItemSelect != NULL) {
+        ((void (*)(id, SEL, BOOL))OriginalPivotBarItemSelect)(receiver, selector, selected);
+    }
+    id presetVal = YTKACEPreferenceObject(YTKACEAccentPresetKey);
+    NSInteger preset = [presetVal respondsToSelector:@selector(integerValue)] ? [presetVal integerValue] : 0;
+    if (selected && preset > 0) {
+        receiver.tintColor = YTKACEAppAccentColor();
+    }
 }
 
 void YTKACEInstallOLEDHooks(void) {
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
         YTKACEOLEDOriginals = [NSMutableDictionary dictionary];
+
+        [NSNotificationCenter.defaultCenter
+            addObserverForName:YTKACEPreferencesDidChangeNotification
+                        object:nil
+                         queue:NSOperationQueue.mainQueue
+                    usingBlock:^(NSNotification *note) {
+            NSString *key = note.userInfo[@"key"];
+            if ([key hasPrefix:@"YTKACE.Preference.Appearance"] ||
+                [key isEqualToString:YTKACEOLEDKey]) {
+                YTKACERefreshAllThemeViews();
+            }
+        }];
     });
 
     for (NSString *selector in @[@"black0", @"black1", @"black2", @"black3", @"black4"]) {
@@ -248,6 +338,26 @@ void YTKACEInstallOLEDHooks(void) {
         YTKACEInstallColorHook(@"YTCommonColorPalette", selector, YES);
     }
 
+    // Accent color hooks
+    NSArray<NSString *> *accentSelectors = @[
+        @"staticBrandRed",
+        @"brandRed",
+        @"brandPrimary",
+        @"callToAction",
+        @"callToActionInverse",
+        @"badgeSelected"
+    ];
+    for (NSString *selector in accentSelectors) {
+        YTKACEInstallAccentHook(@"YTColor", selector, YES);
+        YTKACEInstallAccentHook(@"YTCommonColorPalette", selector, NO);
+        YTKACEInstallAccentHook(@"YTCommonColorPalette", selector, YES);
+    }
+
+    YTKACEInstallInstanceHook(@"YTPivotBarItemView",
+                              @"setSelected:",
+                              (IMP)YTKACEPivotBarItemSetSelected,
+                              &OriginalPivotBarItemSelect);
+
     YTKACEInstallInstanceHook(@"YTActionSheetDialogViewController",
                               @"viewDidAppear:",
                               (IMP)YTKACEQualitySheetDidAppear,
@@ -260,5 +370,4 @@ void YTKACEInstallOLEDHooks(void) {
                               @"preferredStatusBarStyle",
                               (IMP)YTKACEAppStatusBarStyle,
                               &OriginalAppStatusBarStyle);
-
 }

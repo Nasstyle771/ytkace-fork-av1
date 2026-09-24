@@ -17,6 +17,18 @@ NSString * const YTKACESleepTimerKey = @"YTKACE.Preference.Player.SleepTimer";
 NSString * const YTKACEPreferencesDidChangeNotification =
     @"YTKACEPreferencesDidChangeNotification";
 
+NSString * const YTKACEThemePresetKey = @"YTKACE.Preference.Appearance.ThemePreset";
+NSString * const YTKACEThemeCustomBgKey = @"YTKACE.Preference.Appearance.ThemeCustomBg";
+NSString * const YTKACEThemeCustomSurfaceKey = @"YTKACE.Preference.Appearance.ThemeCustomSurface";
+NSString * const YTKACEAccentPresetKey = @"YTKACE.Preference.Appearance.AccentPreset";
+NSString * const YTKACEAccentCustomHexKey = @"YTKACE.Preference.Appearance.AccentCustomHex";
+NSString * const YTKACE120HzEnabledKey = @"YTKACE.Preference.Display.120HzEnabled";
+NSString * const YTKACE120HzModeKey = @"YTKACE.Preference.Display.120HzMode";
+NSString * const YTKACESmoothScrollBoostKey = @"YTKACE.Preference.Display.SmoothScrollBoost";
+NSString * const YTKACEPreserveVideoFPSKey = @"YTKACE.Preference.Display.PreserveVideoFPS";
+NSString * const YTKACEPreferredCodecKey = @"YTKACE.Preference.Streaming.PreferredCodec";
+NSString * const YTKACEHighBitrateBufferBoostKey = @"YTKACE.Preference.Streaming.HighBitrateBufferBoost";
+
 static NSUserDefaults *YTKACEDefaults(void) {
     return NSUserDefaults.standardUserDefaults;
 }
@@ -25,6 +37,11 @@ static void YTKACEAnnouncePreferenceChange(NSString *key) {
     if (key.length == 0) return;
     if ([key isEqualToString:@"YTKACE.Preference.Language"]) {
         YTKACEResetLocalizationCache();
+    }
+    if ([key hasPrefix:@"YTKACE.Preference.Appearance.Theme"] ||
+        [key hasPrefix:@"YTKACE.Preference.Appearance.Accent"] ||
+        [key isEqualToString:YTKACEOLEDKey]) {
+        YTKACEClearThemeColorCache();
     }
     void (^post)(void) = ^{
         [NSNotificationCenter.defaultCenter
@@ -61,6 +78,17 @@ void YTKACERegisterDefaults(void) {
         YTKACEPiPKey: @NO,
         YTKACESpeedKey: @NO,
         YTKACELoopKey: @NO,
+        YTKACEThemePresetKey: @0,
+        YTKACEThemeCustomBgKey: @"#000000",
+        YTKACEThemeCustomSurfaceKey: @"#121212",
+        YTKACEAccentPresetKey: @0,
+        YTKACEAccentCustomHexKey: @"#FF0000",
+        YTKACE120HzEnabledKey: @YES,
+        YTKACE120HzModeKey: @0,
+        YTKACESmoothScrollBoostKey: @YES,
+        YTKACEPreserveVideoFPSKey: @YES,
+        YTKACEPreferredCodecKey: @1,
+        YTKACEHighBitrateBufferBoostKey: @YES,
         @"YTKACE.Preference.Playback.CustomDoubleTap": @NO,
         @"YTKACE.Preference.Playback.TapToSeek": @NO,
         @"YTKACE.Preference.Sharing.NativeSheet": @NO,
@@ -212,8 +240,48 @@ BOOL YTKACEFeatureEnabled(NSString *key) {
     return [YTKACEDefaults() boolForKey:key];
 }
 
+static UIColor *s_cachedThemeBg[16] = {nil};
+static UIColor *s_cachedThemeSurface[16] = {nil};
+static UIColor *s_cachedAccent[16] = {nil};
+
+void YTKACEClearThemeColorCache(void) {
+    for (int i = 0; i < 16; i++) {
+        s_cachedThemeBg[i] = nil;
+        s_cachedThemeSurface[i] = nil;
+        s_cachedAccent[i] = nil;
+    }
+}
+
+UIColor *YTKACEColorFromHex(NSString *hex, UIColor *fallback) {
+    if (hex.length == 0) return fallback ?: UIColor.blackColor;
+    const char *cStr = hex.UTF8String;
+    if (!cStr) return fallback ?: UIColor.blackColor;
+    if (*cStr == '#') cStr++;
+    if (strlen(cStr) != 6) return fallback ?: UIColor.blackColor;
+    char *end = NULL;
+    unsigned long rgb = strtoul(cStr, &end, 16);
+    if (end == cStr || *end != '\0') return fallback ?: UIColor.blackColor;
+    return [UIColor colorWithRed:((rgb >> 16) & 0xFF) / 255.0
+                           green:((rgb >> 8) & 0xFF) / 255.0
+                            blue:(rgb & 0xFF) / 255.0
+                           alpha:1.0];
+}
+
+BOOL YTKACEIsLightMode(UITraitCollection *traits) {
+    UIUserInterfaceStyle style = traits ? traits.userInterfaceStyle : UIUserInterfaceStyleUnspecified;
+    if (style == UIUserInterfaceStyleUnspecified) {
+        if (@available(iOS 13.0, *)) {
+            style = UIScreen.mainScreen.traitCollection.userInterfaceStyle;
+        }
+    }
+    return (style == UIUserInterfaceStyleLight);
+}
+
 BOOL YTKACEOLEDActive(UITraitCollection *traits) {
-    if (!YTKACEFeatureEnabled(YTKACEOLEDKey)) {
+    BOOL oledEnabled = YTKACEFeatureEnabled(YTKACEOLEDKey);
+    id themeVal = YTKACEPreferenceObject(YTKACEThemePresetKey);
+    NSInteger themePreset = [themeVal respondsToSelector:@selector(integerValue)] ? [themeVal integerValue] : 0;
+    if (!oledEnabled && themePreset == 0) {
         return NO;
     }
     UITraitCollection *current = traits;
@@ -234,8 +302,108 @@ BOOL YTKACEOLEDActive(UITraitCollection *traits) {
     return current.userInterfaceStyle == UIUserInterfaceStyleDark;
 }
 
+UIColor *YTKACEThemeBackgroundColor(UITraitCollection *traits) {
+    if (!YTKACEOLEDActive(traits)) {
+        return YTKACEInterfaceBackgroundColor(traits);
+    }
+    id themeVal = YTKACEPreferenceObject(YTKACEThemePresetKey);
+    NSInteger preset = [themeVal respondsToSelector:@selector(integerValue)] ? [themeVal integerValue] : 0;
+    if (preset == 0 && YTKACEFeatureEnabled(YTKACEOLEDKey)) {
+        preset = 1; // Default OLED pure black
+    }
+    if (preset >= 0 && preset < 16 && s_cachedThemeBg[preset] != nil) {
+        return s_cachedThemeBg[preset];
+    }
+    UIColor *color = nil;
+    switch (preset) {
+        case 1: // OLED Pure Black
+            color = UIColor.blackColor;
+            break;
+        case 2: // Midnight Navy
+            color = [UIColor colorWithRed:8.0/255.0 green:13.0/255.0 blue:26.0/255.0 alpha:1.0];
+            break;
+        case 3: // Crimson Ember
+            color = [UIColor colorWithRed:18.0/255.0 green:5.0/255.0 blue:7.0/255.0 alpha:1.0];
+            break;
+        case 4: // Amethyst Purple
+            color = [UIColor colorWithRed:13.0/255.0 green:7.0/255.0 blue:20.0/255.0 alpha:1.0];
+            break;
+        case 5: // Emerald Matrix
+            color = [UIColor colorWithRed:5.0/255.0 green:17.0/255.0 blue:9.0/255.0 alpha:1.0];
+            break;
+        case 6: // Cyberpunk Neon
+            color = [UIColor colorWithRed:5.0/255.0 green:8.0/255.0 blue:17.0/255.0 alpha:1.0];
+            break;
+        case 7: // Sunset Orange
+            color = [UIColor colorWithRed:20.0/255.0 green:8.0/255.0 blue:11.0/255.0 alpha:1.0];
+            break;
+        case 8: { // Custom Hex
+            NSString *hex = [YTKACEDefaults() stringForKey:YTKACEThemeCustomBgKey];
+            color = YTKACEColorFromHex(hex, UIColor.blackColor);
+            break;
+        }
+        default:
+            color = UIColor.blackColor;
+            break;
+    }
+    if (preset >= 0 && preset < 16) {
+        s_cachedThemeBg[preset] = color;
+    }
+    return color;
+}
+
+UIColor *YTKACEThemeSurfaceColor(UITraitCollection *traits) {
+    if (!YTKACEOLEDActive(traits)) {
+        return YTKACEInterfaceSurfaceColor(traits);
+    }
+    id themeVal = YTKACEPreferenceObject(YTKACEThemePresetKey);
+    NSInteger preset = [themeVal respondsToSelector:@selector(integerValue)] ? [themeVal integerValue] : 0;
+    if (preset == 0 && YTKACEFeatureEnabled(YTKACEOLEDKey)) {
+        preset = 1;
+    }
+    if (preset >= 0 && preset < 16 && s_cachedThemeSurface[preset] != nil) {
+        return s_cachedThemeSurface[preset];
+    }
+    UIColor *color = nil;
+    switch (preset) {
+        case 1: // OLED Surface
+            color = [UIColor colorWithWhite:0.07 alpha:1.0];
+            break;
+        case 2: // Midnight Navy Surface
+            color = [UIColor colorWithRed:16.0/255.0 green:23.0/255.0 blue:42.0/255.0 alpha:1.0];
+            break;
+        case 3: // Crimson Ember Surface
+            color = [UIColor colorWithRed:30.0/255.0 green:12.0/255.0 blue:16.0/255.0 alpha:1.0];
+            break;
+        case 4: // Amethyst Purple Surface
+            color = [UIColor colorWithRed:27.0/255.0 green:15.0/255.0 blue:42.0/255.0 alpha:1.0];
+            break;
+        case 5: // Emerald Matrix Surface
+            color = [UIColor colorWithRed:12.0/255.0 green:32.0/255.0 blue:20.0/255.0 alpha:1.0];
+            break;
+        case 6: // Cyberpunk Neon Surface
+            color = [UIColor colorWithRed:10.0/255.0 green:19.0/255.0 blue:38.0/255.0 alpha:1.0];
+            break;
+        case 7: // Sunset Orange Surface
+            color = [UIColor colorWithRed:36.0/255.0 green:14.0/255.0 blue:20.0/255.0 alpha:1.0];
+            break;
+        case 8: { // Custom Hex Surface
+            NSString *hex = [YTKACEDefaults() stringForKey:YTKACEThemeCustomSurfaceKey];
+            color = YTKACEColorFromHex(hex, [UIColor colorWithWhite:0.08 alpha:1.0]);
+            break;
+        }
+        default:
+            color = [UIColor colorWithWhite:0.07 alpha:1.0];
+            break;
+    }
+    if (preset >= 0 && preset < 16) {
+        s_cachedThemeSurface[preset] = color;
+    }
+    return color;
+}
+
 UIColor *YTKACEInterfaceBackgroundColor(UITraitCollection *traits) {
-    if (YTKACEOLEDActive(traits)) return UIColor.blackColor;
+    if (YTKACEOLEDActive(traits)) return YTKACEThemeBackgroundColor(traits);
     UIUserInterfaceStyle style = traits.userInterfaceStyle;
     if (style == UIUserInterfaceStyleUnspecified) {
         style = UIScreen.mainScreen.traitCollection.userInterfaceStyle;
@@ -246,9 +414,7 @@ UIColor *YTKACEInterfaceBackgroundColor(UITraitCollection *traits) {
 }
 
 UIColor *YTKACEInterfaceSurfaceColor(UITraitCollection *traits) {
-    if (YTKACEOLEDActive(traits)) {
-        return UIColor.blackColor;
-    }
+    if (YTKACEOLEDActive(traits)) return YTKACEThemeSurfaceColor(traits);
     UIUserInterfaceStyle style = traits.userInterfaceStyle;
     if (style == UIUserInterfaceStyleUnspecified) {
         style = UIScreen.mainScreen.traitCollection.userInterfaceStyle;
@@ -256,6 +422,59 @@ UIColor *YTKACEInterfaceSurfaceColor(UITraitCollection *traits) {
     return style == UIUserInterfaceStyleDark
         ? [UIColor colorWithWhite:0.16 alpha:1.0]
         : [UIColor colorWithWhite:0.95 alpha:1.0];
+}
+
+UIColor *YTKACEAppAccentColor(void) {
+    return YTKACEAppAccentColorForTraits(nil);
+}
+
+UIColor *YTKACEAppAccentColorForTraits(UITraitCollection *traits) {
+    (void)traits;
+    id presetVal = YTKACEPreferenceObject(YTKACEAccentPresetKey);
+    NSInteger preset = [presetVal respondsToSelector:@selector(integerValue)] ? [presetVal integerValue] : 0;
+    if (preset >= 0 && preset < 16 && s_cachedAccent[preset] != nil) {
+        return s_cachedAccent[preset];
+    }
+    UIColor *color = nil;
+    switch (preset) {
+        case 1: // Electric Blue
+            color = [UIColor colorWithRed:0.23 green:0.51 blue:0.96 alpha:1.0]; // #3B82F6
+            break;
+        case 2: // Neon Cyan
+            color = [UIColor colorWithRed:0.02 green:0.71 blue:0.83 alpha:1.0]; // #06B6D4
+            break;
+        case 3: // Emerald Green
+            color = [UIColor colorWithRed:0.06 green:0.73 blue:0.51 alpha:1.0]; // #10B981
+            break;
+        case 4: // Amethyst Purple
+            color = [UIColor colorWithRed:0.66 green:0.33 blue:0.97 alpha:1.0]; // #A855F7
+            break;
+        case 5: // Sunset Orange
+            color = [UIColor colorWithRed:0.98 green:0.45 blue:0.09 alpha:1.0]; // #F97316
+            break;
+        case 6: // Hot Pink
+            color = [UIColor colorWithRed:0.93 green:0.28 blue:0.60 alpha:1.0]; // #EC4899
+            break;
+        case 7: // Pure Amber
+            color = [UIColor colorWithRed:0.96 green:0.62 blue:0.04 alpha:1.0]; // #F59E0B
+            break;
+        case 8: { // Custom Hex
+            NSString *hex = [YTKACEDefaults() stringForKey:YTKACEAccentCustomHexKey];
+            color = YTKACEColorFromHex(hex, [UIColor colorWithRed:1.0 green:0.0 blue:0.0 alpha:1.0]);
+            break;
+        }
+        default: // YouTube Red
+            color = [UIColor colorWithRed:1.0 green:0.0 blue:0.0 alpha:1.0]; // #FF0000
+            break;
+    }
+    if (preset >= 0 && preset < 16) {
+        s_cachedAccent[preset] = color;
+    }
+    return color;
+}
+
+BOOL YTKACE120HzActive(void) {
+    return YTKACEFeatureEnabled(YTKACE120HzEnabledKey);
 }
 
 BOOL YTKACESponsorBlockEnabled(void) {

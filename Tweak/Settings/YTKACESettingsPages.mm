@@ -1575,7 +1575,17 @@ static NSDictionary *YTKACEOverlayOptionsDefinition(void) {
 
 static NSDictionary *YTKACEStreamingOptionsDefinition(void) {
     return YTKACEPageDefinition(@"playback", @"Playback", @[
-        @[YTKACEToggle(@"Old Quality Menu", @"YTKACE.Preference.Playback.LegacyQualityMenu", @"", @"")],
+        @[
+            YTKACEToggle(@"Old Quality Menu", @"YTKACE.Preference.Playback.LegacyQualityMenu", @"", @""),
+            YTKACEPickerDetail(@"Preferred Video Codec",
+                               @"Prioritizes selected codec when fetching streams or offering downloads.",
+                               YTKACEPreferredCodecKey,
+                               @[@"Auto (Optimal)", @"AV1 (High Efficiency)", @"VP9", @"H.264 (AVC)"],
+                               @[@0, @1, @2, @3], 1),
+            YTKACEToggleDetail(@"High-Bitrate Buffer Boost",
+                               @"Expands AVPlayer forward buffer to 60s for stutter-free 4K/AV1 playback.",
+                               YTKACEHighBitrateBufferBoostKey)
+        ],
         @[
             YTKACEToggle(@"Custom Double-Tap Time", @"YTKACE.Preference.Playback.CustomDoubleTap", @"", @""),
             YTKACEStepper(@"Skip Time", @"YTKACE.Preference.Playback.DoubleTapSeconds", 5.0, 60.0, 5.0, 10.0)
@@ -1750,6 +1760,93 @@ static NSDictionary *YTKACEGestureOptionsDefinition(void) {
           YTKACELocalized(@"SEEK")]);
 }
 
+static NSDictionary *YTKACEAppearanceOptionsDefinition(void) {
+    NSArray *themeTitles = @[
+        @"Default Dark",
+        @"Pure OLED Black",
+        @"Midnight Navy",
+        @"Crimson Ember",
+        @"Amethyst Purple",
+        @"Emerald Matrix",
+        @"Cyberpunk Neon",
+        @"Sunset Orange",
+        @"Custom Hex"
+    ];
+    NSArray *themeValues = @[@0, @1, @2, @3, @4, @5, @6, @7, @8];
+
+    NSArray *accentTitles = @[
+        @"Default Red",
+        @"Electric Blue",
+        @"Neon Cyan",
+        @"Emerald Green",
+        @"Amethyst Purple",
+        @"Sunset Orange",
+        @"Hot Pink",
+        @"Amber Gold",
+        @"Custom Hex"
+    ];
+    NSArray *accentValues = @[@0, @1, @2, @3, @4, @5, @6, @7, @8];
+
+    return YTKACEPageDefinition(@"appearance", @"Appearance & Themes", @[
+        @[
+            YTKACEToggleDetail(@"Enable Custom Theme",
+                               @"Apply custom OLED black or colored background and surface palettes.",
+                               YTKACEOLEDKey),
+            YTKACEPicker(@"Theme Preset",
+                         YTKACEThemePresetKey,
+                         themeTitles, themeValues, 0, @"", @"paintpalette"),
+            YTKACEColor(@"Custom Background Color", YTKACEThemeCustomBgKey, @"#000000"),
+            YTKACEColor(@"Custom Surface Color", YTKACEThemeCustomSurfaceKey, @"#121212")
+        ],
+        @[
+            YTKACEPicker(@"Accent Preset",
+                         YTKACEAccentPresetKey,
+                         accentTitles, accentValues, 0, @"", @"eyedropper"),
+            YTKACEColor(@"Custom Accent Color", YTKACEAccentCustomHexKey, @"#3EA6FF")
+        ],
+        @[
+            YTKACEToggleDetail(@"Skip Launch Animation",
+                               @"Starts YouTube faster without the splash delay.",
+                               @"YTKACE.Preference.Appearance.LaunchAnimationDisabled")
+        ]
+    ], @[
+        YTKACELocalized(@"THEME PRESETS"),
+        YTKACELocalized(@"ACCENT COLOR"),
+        YTKACELocalized(@"ANIMATIONS")
+    ]);
+}
+
+static NSDictionary *YTKACEDisplayRateOptionsDefinition(void) {
+    return YTKACEPageDefinition(@"display", @"Display & 120Hz", @[
+        @[
+            YTKACEToggleDetail(@"Enable ProMotion 120Hz",
+                               @"Unlocks full 120 FPS high refresh rate on supported iPad and iPhone Pro displays.",
+                               YTKACE120HzEnabledKey),
+            YTKACEPickerDetail(@"Refresh Rate Mode",
+                               @"Adaptive dynamically scales 80-120Hz to preserve battery. Locked forces peak 120Hz.",
+                               YTKACE120HzModeKey,
+                               @[@"Adaptive (80-120Hz)", @"Locked 120Hz"],
+                               @[@0, @1], 0),
+            YTKACEToggleDetail(@"Smooth Feed Scroll Boost",
+                               @"Pre-allocates and renders up to 4 offscreen feed screens to eliminate scroll hitching.",
+                               YTKACESmoothScrollBoostKey),
+            YTKACEToggleDetail(@"Preserve Video Frame Rate",
+                               @"Prevents 3:2 pulldown judder by locking to native video cadence (24/30/60 FPS) during active playback.",
+                               YTKACEPreserveVideoFPSKey)
+        ]
+    ], @[
+        YTKACELocalized(@"PROMOTION ENGINE")
+    ]);
+}
+
+UIViewController *YTKACEMakeAppearanceOptionsController(void) {
+    return YTKACEPageFromDefinition(YTKACEAppearanceOptionsDefinition());
+}
+
+UIViewController *YTKACEMakeDisplayRateOptionsController(void) {
+    return YTKACEPageFromDefinition(YTKACEDisplayRateOptionsDefinition());
+}
+
 UIViewController *YTKACEMakeSponsorBlockController(void) {
     return YTKACEPageFromDefinition(YTKACESponsorBlockDefinition());
 }
@@ -1784,6 +1881,8 @@ UIViewController *YTKACEMakeGestureOptionsController(void) {
 
 NSArray<NSDictionary *> *YTKACEAllPageDefinitions(void) {
     return @[
+        YTKACEAppearanceOptionsDefinition(),
+        YTKACEDisplayRateOptionsDefinition(),
         YTKACESponsorBlockDefinition(),
         YTKACEPlayerControlsDefinition(),
         YTKACEOverlayOptionsDefinition(),

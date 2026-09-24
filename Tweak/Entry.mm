@@ -20,6 +20,7 @@ static void YTKACEInstallModules(void) {
     YTKACEInstallSponsorBlockHooks();
     YTKACEInstallDeArrow();
     YTKACEInstallOLEDHooks();
+    YTKACEInstallDisplayRateHooks();
     YTKACEInstallStartupHooks();
     YTKACEInstallPremiumLogoHooks();
     YTKACEInstallBackgroundPlaybackHooks();

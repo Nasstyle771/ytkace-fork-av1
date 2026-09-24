@@ -35,6 +35,7 @@ YTKACE_FILES = \
 	Tweak/Features/Downloads/YTKACEAudioPlayerController.mm \
 	Tweak/Features/Downloads/GlobalDownloadMiniPlayer.mm \
 	Tweak/Features/Appearance/OLEDHooks.mm \
+	Tweak/Features/Appearance/DisplayRateHooks.mm \
 	Tweak/Features/Appearance/StartupHooks.mm \
 	Tweak/Features/Appearance/PremiumLogoHooks.mm \
 	Tweak/Features/Queue/QueueHooks.mm \

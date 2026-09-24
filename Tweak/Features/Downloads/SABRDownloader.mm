@@ -948,10 +948,10 @@ NSUInteger YTKACEPurgeDownloadScratch(BOOL includeActive) {
     configuration.allowsCellularAccess = YES;
     configuration.allowsExpensiveNetworkAccess = YES;
     configuration.allowsConstrainedNetworkAccess = YES;
-    configuration.networkServiceType = (NSURLRequestNetworkServiceType)8;
-    configuration.HTTPMaximumConnectionsPerHost = 4;
+    configuration.networkServiceType = (NSURLRequestNetworkServiceType)6;
+    configuration.HTTPMaximumConnectionsPerHost = 8;
     NSOperationQueue *queue = [NSOperationQueue new];
-    queue.maxConcurrentOperationCount = 1;
+    queue.maxConcurrentOperationCount = 4;
     queue.qualityOfService = NSQualityOfServiceUtility;
     self.session = [NSURLSession sessionWithConfiguration:configuration
         delegate:self delegateQueue:queue];

@@ -6,11 +6,14 @@
 #import <objc/message.h>
 #import <objc/runtime.h>
 #import <SystemConfiguration/SystemConfiguration.h>
+#import <AVFoundation/AVFoundation.h>
 
 static IMP OriginalLegacyQuality;
 static IMP OriginalSetUserSelectableFormats;
 static IMP OriginalDidLoadContentPlaybackData;
 static IMP OriginalQualityHandleTap;
+static IMP OriginalPlayerItemSetForwardBufferDuration;
+static IMP OriginalPlayerItemForwardBufferDuration;
 static NSMutableDictionary<NSString *, NSValue *> *YTKACEStreamingOriginals;
 static const void *YTKACERedesignedQualityControllerKey =
     &YTKACERedesignedQualityControllerKey;
@@ -29,6 +32,26 @@ static IMP YTKACEStreamingOriginal(id receiver, SEL selector) {
         }
     }
     return NULL;
+}
+
+static void YTKACEPlayerItemSetForwardBufferDuration(AVPlayerItem *receiver, SEL selector, NSTimeInterval duration) {
+    if (YTKACEFeatureEnabled(YTKACEHighBitrateBufferBoostKey)) {
+        if (duration < 60.0) duration = 60.0;
+    }
+    if (OriginalPlayerItemSetForwardBufferDuration != NULL) {
+        ((void (*)(id, SEL, NSTimeInterval))OriginalPlayerItemSetForwardBufferDuration)(
+            receiver, selector, duration);
+    }
+}
+
+static NSTimeInterval YTKACEPlayerItemForwardBufferDuration(AVPlayerItem *receiver, SEL selector) {
+    NSTimeInterval duration = OriginalPlayerItemForwardBufferDuration != NULL
+        ? ((NSTimeInterval (*)(id, SEL))OriginalPlayerItemForwardBufferDuration)(receiver, selector)
+        : 0.0;
+    if (YTKACEFeatureEnabled(YTKACEHighBitrateBufferBoostKey)) {
+        if (duration < 60.0) duration = 60.0;
+    }
+    return duration;
 }
 
 static BOOL YTKACELegacyQuality(id receiver, SEL selector) {
@@ -484,4 +507,13 @@ void YTKACEInstallStreamingHooks(void) {
                                     (IMP)YTKACECellularQualityValue);
         }
     }
+
+    YTKACEInstallInstanceHook(@"AVPlayerItem",
+                              @"setPreferredForwardBufferDuration:",
+                              (IMP)YTKACEPlayerItemSetForwardBufferDuration,
+                              &OriginalPlayerItemSetForwardBufferDuration);
+    YTKACEInstallInstanceHook(@"AVPlayerItem",
+                              @"preferredForwardBufferDuration",
+                              (IMP)YTKACEPlayerItemForwardBufferDuration,
+                              &OriginalPlayerItemForwardBufferDuration);
 }

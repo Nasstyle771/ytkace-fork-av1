@@ -2,6 +2,8 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
+FOUNDATION_EXPORT UIViewController *YTKACEMakeAppearanceOptionsController(void);
+FOUNDATION_EXPORT UIViewController *YTKACEMakeDisplayRateOptionsController(void);
 FOUNDATION_EXPORT UIViewController *YTKACEMakePlayerControlsController(void);
 FOUNDATION_EXPORT UIViewController *YTKACEMakeSponsorBlockController(void);
 FOUNDATION_EXPORT UIViewController *YTKACEMakeTabBarOptionsController(void);
