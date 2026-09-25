@@ -30,6 +30,7 @@
 
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
+#import <AVFoundation/AVFoundation.h>
 #import <objc/message.h>
 #import <objc/runtime.h>
 #import <QuartzCore/QuartzCore.h>

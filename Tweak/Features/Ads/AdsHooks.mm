@@ -248,17 +248,6 @@ static id YTKACEObjectValue(id object, NSString *selectorName) {
     }
 }
 
-static BOOL YTKACEObjectBool(id object, NSString *selectorName) {
-    if (object == nil) return NO;
-    SEL selector = NSSelectorFromString(selectorName);
-    if (![object respondsToSelector:selector]) return NO;
-    @try {
-        return ((BOOL (*)(id, SEL))objc_msgSend)(object, selector);
-    } @catch (__unused NSException *exception) {
-        return NO;
-    }
-}
-
 static BOOL YTKACEReelObjectLooksLikeAd(id object, NSUInteger depth) {
     if (object == nil || depth > 3) return NO;
 

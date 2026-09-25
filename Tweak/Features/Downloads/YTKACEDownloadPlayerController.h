@@ -13,15 +13,15 @@ extern NSNotificationName const YTKACEDownloadPlaybackDidStopNotification;
 
 + (instancetype)sharedSession;
 
-@property(atomic, strong, readonly) AVPlayer *player;
-@property(atomic, copy, readonly, nullable) NSURL *currentURL;
-@property(atomic, copy, readonly) NSArray<NSURL *> *playlist;
-@property(atomic, assign, readonly) NSInteger currentIndex;
-@property(atomic, assign) BOOL autoplayEnabled;
-@property(atomic, assign) BOOL gesturesEnabled;
-@property(atomic, assign) BOOL repeatEnabled;
-@property(atomic, assign) BOOL pauseAtEnd;
-@property(atomic, assign) float playbackRate;
+@property(nonatomic, strong, readonly) AVPlayer *player;
+@property(nonatomic, copy, readonly, nullable) NSURL *currentURL;
+@property(nonatomic, copy, readonly) NSArray<NSURL *> *playlist;
+@property(nonatomic, assign, readonly) NSInteger currentIndex;
+@property(nonatomic, assign) BOOL autoplayEnabled;
+@property(nonatomic, assign) BOOL gesturesEnabled;
+@property(nonatomic, assign) BOOL repeatEnabled;
+@property(nonatomic, assign) BOOL pauseAtEnd;
+@property(nonatomic, assign) float playbackRate;
 
 - (void)loadURL:(NSURL *)URL
        playlist:(NSArray<NSURL *> *)playlist

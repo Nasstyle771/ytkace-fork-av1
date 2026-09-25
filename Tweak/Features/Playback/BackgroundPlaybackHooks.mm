@@ -2,6 +2,7 @@
 #import "../../Runtime/Hooking.h"
 #import "../../Runtime/Preferences.h"
 #import <AVFoundation/AVFoundation.h>
+#import <UIKit/UIKit.h>
 
 static IMP OriginalPlayableInBackground;
 static IMP OriginalMLPlayableInBackground;

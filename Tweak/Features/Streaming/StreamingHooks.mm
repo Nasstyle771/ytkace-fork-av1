@@ -40,7 +40,9 @@ static void YTKACEPlayerItemSetForwardBufferDuration(AVPlayerItem *receiver, SEL
     if (YTKACEFeatureEnabled(YTKACEHighBitrateBufferBoostKey)) {
         if (duration < 60.0) duration = 60.0;
         receiver.preferredPeakBitRate = 0.0;
-        receiver.automaticallyWaitsToMinimizeStalling = YES;
+        if ([receiver respondsToSelector:@selector(setAutomaticallyWaitsToMinimizeStalling:)]) {
+            ((void (*)(id, SEL, BOOL))objc_msgSend)(receiver, @selector(setAutomaticallyWaitsToMinimizeStalling:), YES);
+        }
     }
     if (OriginalPlayerItemSetForwardBufferDuration != NULL) {
         ((void (*)(id, SEL, NSTimeInterval))OriginalPlayerItemSetForwardBufferDuration)(
@@ -64,8 +66,10 @@ static id YTKACEPlayerItemInitWithURL(AVPlayerItem *receiver, SEL selector, NSUR
         : receiver;
     if (item != nil && YTKACEFeatureEnabled(YTKACEHighBitrateBufferBoostKey)) {
         [item setPreferredForwardBufferDuration:60.0];
-        [item setAutomaticallyWaitsToMinimizeStalling:YES];
         [item setPreferredPeakBitRate:0.0];
+        if ([item respondsToSelector:@selector(setAutomaticallyWaitsToMinimizeStalling:)]) {
+            ((void (*)(id, SEL, BOOL))objc_msgSend)(item, @selector(setAutomaticallyWaitsToMinimizeStalling:), YES);
+        }
     }
     return item;
 }
@@ -76,8 +80,10 @@ static id YTKACEPlayerItemInitWithAsset(AVPlayerItem *receiver, SEL selector, AV
         : receiver;
     if (item != nil && YTKACEFeatureEnabled(YTKACEHighBitrateBufferBoostKey)) {
         [item setPreferredForwardBufferDuration:60.0];
-        [item setAutomaticallyWaitsToMinimizeStalling:YES];
         [item setPreferredPeakBitRate:0.0];
+        if ([item respondsToSelector:@selector(setAutomaticallyWaitsToMinimizeStalling:)]) {
+            ((void (*)(id, SEL, BOOL))objc_msgSend)(item, @selector(setAutomaticallyWaitsToMinimizeStalling:), YES);
+        }
     }
     return item;
 }

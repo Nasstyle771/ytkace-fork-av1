@@ -45,24 +45,6 @@ static BOOL YTKACEOverlayPreference(NSString *key) {
     return YTKACEFeatureEnabled(key);
 }
 
-static inline BOOL YTKACEStringContainsAny(NSString *str, NSArray<NSString *> *needles) {
-    if (str.length == 0) return NO;
-    for (NSString *needle in needles) {
-        if ([str rangeOfString:needle options:NSCaseInsensitiveSearch].location != NSNotFound) {
-            return YES;
-        }
-    }
-    return NO;
-}
-
-static inline BOOL YTKACEViewMatchesAny(UIView *view, NSArray<NSString *> *needles) {
-    if (view == nil) return NO;
-    if (YTKACEStringContainsAny(view.accessibilityIdentifier, needles)) return YES;
-    if (YTKACEStringContainsAny(view.accessibilityLabel, needles)) return YES;
-    if (YTKACEStringContainsAny(NSStringFromClass(view.class), needles)) return YES;
-    return NO;
-}
-
 static NSString *YTKACEOverlayToken(UIView *view) {
     if (view == nil) return @"";
     return [[NSString stringWithFormat:@"%@ %@ %@",

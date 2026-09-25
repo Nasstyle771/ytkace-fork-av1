@@ -79,6 +79,7 @@ YTKACE_FILES = \
 	Tweak/Settings/YTKACEDownloadsController.mm
 
 YTKACE_CFLAGS = -fobjc-arc -Wall -Wextra -Werror=return-type
+YTKACE_CFLAGS += -Wno-unused-function -Wno-unused-parameter
 YTKACE_CFLAGS += -DYTKACE_COMBINED_SABR=1
 YTKACE_CFLAGS += -Wno-module-import-in-extern-c
 YTKACE_CFLAGS += -I$(THEOS_PROJECT_DIR)/Vendor/FFmpeg/include

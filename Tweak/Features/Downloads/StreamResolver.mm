@@ -205,11 +205,6 @@ static NSInteger YTKACEVideoPreference(YTKACEStreamOption *option) {
     return 1;
 }
 
-static BOOL YTKACEHighResolutionSupported(YTKACEStreamOption *option) {
-    (void)option;
-    return YES;
-}
-
 static NSString *YTKACEVideoRejectReason(YTKACEStreamOption *option) {
     if (![option.mimeType hasPrefix:@"video/"]) return @"not video";
     if (option.itag <= 0) return @"no itag";

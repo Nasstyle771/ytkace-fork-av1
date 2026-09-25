@@ -1,5 +1,6 @@
 #import "YTKACESettingsSearch.h"
 #import "YTKACESettingsPages.h"
+#import "../Runtime/Preferences.h"
 #import "../Runtime/Localization.h"
 #import "../UI/Assets.h"
 

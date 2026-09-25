@@ -1002,8 +1002,10 @@ static void YTKACEQueueSyncFromController(id controller) {
 static void YTKACEQueueMoveItem(id receiver, SEL selector, id from, id to,
                                 BOOL triggered) {
     if ([from respondsToSelector:@selector(item)] && [to respondsToSelector:@selector(item)]) {
-        NSInteger fromRow = [from respondsToSelector:@selector(row)] ? [from row] : [from item];
-        NSInteger toRow = [to respondsToSelector:@selector(row)] ? [to row] : [to item];
+        NSIndexPath *fromPath = (NSIndexPath *)from;
+        NSIndexPath *toPath = (NSIndexPath *)to;
+        NSInteger fromRow = [fromPath respondsToSelector:@selector(row)] ? [fromPath row] : [fromPath item];
+        NSInteger toRow = [toPath respondsToSelector:@selector(row)] ? [toPath row] : [toPath item];
         NSMutableArray *queue = YTKACEQueue();
         if (fromRow >= 0 && fromRow < (NSInteger)queue.count &&
             toRow >= 0 && toRow < (NSInteger)queue.count && fromRow != toRow) {
