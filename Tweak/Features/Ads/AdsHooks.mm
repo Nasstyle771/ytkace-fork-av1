@@ -519,7 +519,7 @@ static BOOL YTKACEObjectLooksLikeAd(id object) {
     }
 
     os_unfair_lock_lock(&s_classAdLock);
-    CFDictionarySetValue(s_classAdCache, (__bridge const void *)cls, (const void *)(matched ? 2 : 1));
+    CFDictionarySetValue(s_classAdCache, (__bridge const void *)cls, (const void *)(uintptr_t)(matched ? 2 : 1));
     os_unfair_lock_unlock(&s_classAdLock);
 
     objc_setAssociatedObject(object, YTKACEAdMatchAssociation,
