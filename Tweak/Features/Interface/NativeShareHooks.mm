@@ -17,9 +17,13 @@ static id YTKACEShareValue(id object, NSString *name) {
 static NSString *YTKACESerializedShareEntity(id receiver,
                                                id onAppear,
                                                id context) {
-    NSRegularExpression *expression = [NSRegularExpression
-        regularExpressionWithPattern:@"serialized_share_entity: \"([^\"]+)\""
-        options:0 error:nil];
+    static NSRegularExpression *expression;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        expression = [NSRegularExpression
+            regularExpressionWithPattern:@"serialized_share_entity: \"([^\"]+)\""
+            options:0 error:nil];
+    });
     if (expression == nil) return nil;
     for (id object in @[receiver ?: NSNull.null,
                         onAppear ?: NSNull.null,
@@ -72,16 +76,14 @@ static NSData *YTKACEShareFieldData(id fields, NSInteger number) {
 
 static NSString *YTKACEShareFieldFromDescription(id fields, NSInteger number) {
     if (fields == nil) return nil;
-    NSString *pattern = [NSString stringWithFormat:@"\\b%ld: \"([^\"]+)\"",
-                         (long)number];
-    NSRegularExpression *expression = [NSRegularExpression
-        regularExpressionWithPattern:pattern options:0 error:nil];
     NSString *description = [fields description];
-    NSTextCheckingResult *match = [expression
-        firstMatchInString:description options:0
-        range:NSMakeRange(0, description.length)];
-    return match.numberOfRanges > 1
-        ? [description substringWithRange:[match rangeAtIndex:1]] : nil;
+    NSString *prefix = [NSString stringWithFormat:@"%ld: \"", (long)number];
+    NSRange range = [description rangeOfString:prefix];
+    if (range.location == NSNotFound) return nil;
+    NSUInteger start = range.location + range.length;
+    NSRange endRange = [description rangeOfString:@"\"" options:0 range:NSMakeRange(start, description.length - start)];
+    if (endRange.location == NSNotFound) return nil;
+    return [description substringWithRange:NSMakeRange(start, endRange.location - start)];
 }
 
 static NSString *YTKACEShareFieldString(id fields, NSInteger number) {

@@ -17,7 +17,6 @@ static IMP OriginalSemanticContent;
 static IMP OriginalSetSemanticContent;
 static IMP OriginalCaptionTracks;
 static IMP OriginalCaptionControllerAlloc;
-static NSMutableDictionary<NSString *, NSValue *> *YTKACEMiscOriginals;
 static const void *YTKACECaptionTracksAssociation =
     &YTKACECaptionTracksAssociation;
 static const void *YTKACELastCaptionTrackAssociation =
@@ -58,15 +57,17 @@ static BOOL YTKACECaptionRequestReceiver(id receiver, SEL selector) {
         [name containsString:@"hiddenonstart"];
 }
 
-static NSString *YTKACEMiscKey(Class cls, SEL selector) {
-    return [NSString stringWithFormat:@"%@|%@", NSStringFromClass(cls),
-                                      NSStringFromSelector(selector)];
+static CFMutableDictionaryRef s_miscOriginalsByClassAndSel = NULL;
+
+static inline uintptr_t YTKACEMiscLookupKey(Class cls, SEL selector) {
+    return ((uintptr_t)cls) ^ (((uintptr_t)selector) << 4);
 }
 
 static IMP YTKACEMiscOriginal(id receiver, SEL selector) {
+    if (s_miscOriginalsByClassAndSel == NULL) return NULL;
     for (Class cls = object_getClass(receiver); cls != Nil; cls = class_getSuperclass(cls)) {
-        IMP original = (IMP)[YTKACEMiscOriginals[
-            YTKACEMiscKey(cls, selector)] pointerValue];
+        uintptr_t key = YTKACEMiscLookupKey(cls, selector);
+        IMP original = (IMP)CFDictionaryGetValue(s_miscOriginalsByClassAndSel, (const void *)key);
         if (original != NULL) {
             return original;
         }
@@ -444,10 +445,14 @@ static void YTKACEStoreMiscOriginal(NSString *className,
                                     IMP original) {
     Class cls = NSClassFromString(className);
     if (cls != Nil && original != NULL) {
-        YTKACEMiscOriginals[YTKACEMiscKey(
-            cls,
-            NSSelectorFromString(selectorName)
-        )] = [NSValue valueWithPointer:(const void *)original];
+        if (s_miscOriginalsByClassAndSel == NULL) {
+            s_miscOriginalsByClassAndSel = CFDictionaryCreateMutable(
+                kCFAllocatorDefault, 0, NULL, NULL);
+        }
+        SEL sel = NSSelectorFromString(selectorName);
+        CFDictionarySetValue(s_miscOriginalsByClassAndSel,
+                             (const void *)YTKACEMiscLookupKey(cls, sel),
+                             (const void *)original);
     }
 }
 
@@ -690,8 +695,11 @@ static void YTKACEDiscoverMiscHooks(void) {
 }
 
 void YTKACEInstallMiscellaneousHooks(void) {
-    if (YTKACEMiscOriginals == nil) {
-        YTKACEMiscOriginals = [NSMutableDictionary dictionary];
+    if (s_miscOriginalsByClassAndSel == NULL) {
+        s_miscOriginalsByClassAndSel = CFDictionaryCreateMutable(
+            kCFAllocatorDefault, 0, NULL, NULL);
+    }
+    if (YTKACECaptionControllers == nil) {
         YTKACECaptionControllers = [NSHashTable weakObjectsHashTable];
     }
     YTKACEResolveForcedIdiom();

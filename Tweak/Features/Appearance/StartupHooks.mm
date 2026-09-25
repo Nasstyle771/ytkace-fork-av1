@@ -6,24 +6,28 @@
 #import <objc/message.h>
 #import <objc/runtime.h>
 
-static NSMutableDictionary<NSString *, NSValue *> *YTKACEStartupOriginals;
+static CFMutableDictionaryRef s_startupOriginals = NULL;
 
-static IMP YTKACEStartupOriginal(id receiver, SEL selector) {
+static inline void YTKACERegisterStartupOriginal(Class cls, SEL selector, IMP implementation) {
+    if (s_startupOriginals == NULL) {
+        s_startupOriginals = CFDictionaryCreateMutable(kCFAllocatorDefault, 0, NULL, NULL);
+    }
+    NSString *key = [NSString stringWithFormat:@"%@|%@", NSStringFromClass(cls), NSStringFromSelector(selector)];
+    CFDictionarySetValue(s_startupOriginals, (__bridge const void *)key, (const void *)implementation);
+}
+
+static inline IMP YTKACEStartupOriginal(id receiver, SEL selector) {
+    if (s_startupOriginals == NULL || receiver == nil) return NULL;
     for (Class cls = [receiver class]; cls != Nil; cls = class_getSuperclass(cls)) {
-        NSString *key = [NSString stringWithFormat:@"%@|%@",
-                         NSStringFromClass(cls),
-                         NSStringFromSelector(selector)];
-        NSValue *value = YTKACEStartupOriginals[key];
-        if (value == nil) continue;
-        IMP implementation = NULL;
-        [value getValue:&implementation];
-        return implementation;
+        NSString *key = [NSString stringWithFormat:@"%@|%@", NSStringFromClass(cls), NSStringFromSelector(selector)];
+        IMP original = (IMP)CFDictionaryGetValue(s_startupOriginals, (__bridge const void *)key);
+        if (original != NULL) return original;
     }
     return NULL;
 }
 
 static void YTKACEStartupBlacken(UIView *view) {
-    if (view == nil) return;
+    if (view == nil || view.hidden) return;
     UIColor *background = view.backgroundColor;
     if (background != nil && CGColorGetAlpha(background.CGColor) > 0.01) {
         view.backgroundColor = UIColor.blackColor;
@@ -47,17 +51,23 @@ static void YTKACEStartupViewDidLoad(UIViewController *receiver,
 }
 
 static void YTKACEFinishStartup(UIViewController *receiver) {
-    SEL delegateSelector = NSSelectorFromString(@"delegate");
+    static SEL delegateSelector;
+    static SEL completionSelector;
+    static SEL forceSelector;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        delegateSelector = NSSelectorFromString(@"delegate");
+        completionSelector = NSSelectorFromString(@"startupAnimationDidComplete");
+        forceSelector = NSSelectorFromString(@"forceDismissStartupAnimationAnimated:");
+    });
+
     id delegate = [receiver respondsToSelector:delegateSelector]
         ? ((id (*)(id, SEL))objc_msgSend)(receiver, delegateSelector)
         : nil;
-    SEL completionSelector = NSSelectorFromString(@"startupAnimationDidComplete");
     if ([delegate respondsToSelector:completionSelector]) {
         ((void (*)(id, SEL))objc_msgSend)(delegate, completionSelector);
         return;
     }
-    SEL forceSelector =
-        NSSelectorFromString(@"forceDismissStartupAnimationAnimated:");
     if ([delegate respondsToSelector:forceSelector]) {
         ((void (*)(id, SEL, BOOL))objc_msgSend)(delegate, forceSelector, NO);
         return;
@@ -87,23 +97,19 @@ static void YTKACEStartupViewDidAppear(UIViewController *receiver,
 static void YTKACEInstallStartupHook(NSString *className,
                                      NSString *selectorName,
                                      IMP replacement) {
+    Class cls = NSClassFromString(className);
+    if (cls == Nil) return;
+    SEL selector = NSSelectorFromString(selectorName);
     IMP original = NULL;
     if (!YTKACEInstallInstanceHook(className, selectorName,
                                    replacement, &original) ||
         original == NULL || original == replacement) {
         return;
     }
-    YTKACEStartupOriginals[
-        [NSString stringWithFormat:@"%@|%@", className, selectorName]
-    ] = [NSValue value:&original withObjCType:@encode(IMP)];
+    YTKACERegisterStartupOriginal(cls, selector, original);
 }
 
 void YTKACEInstallStartupHooks(void) {
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        YTKACEStartupOriginals = [NSMutableDictionary dictionary];
-    });
-
     for (NSString *className in @[
         @"YTStartupAnimationViewController",
         @"YTRiveStartupAnimationViewController"

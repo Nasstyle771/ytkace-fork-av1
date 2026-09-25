@@ -252,25 +252,36 @@ static BOOL YTKACENavigationShouldHide(UIView *view) {
 }
 
 static BOOL YTKACEIsNavigationIcon(UIView *view) {
-    NSString *token = [[NSString stringWithFormat:@"%@ %@ %@",
-                        NSStringFromClass(view.class),
-                        view.accessibilityIdentifier ?: @"",
-                        view.accessibilityLabel ?: @""] lowercaseString];
-    if ([token containsString:@"account"] ||
-        [token containsString:@"avatar"] ||
-        [token containsString:@"profile"] ||
-        [token containsString:@"logo"]) return NO;
-    if ([token containsString:@"notification"] ||
-        [token containsString:@"bell"] ||
-        [token containsString:@"search"] ||
-        [token containsString:@"cast"] ||
-        [token containsString:@"airplay"] ||
-        [token containsString:@"routebutton"] ||
-        (YTKACEInsideRightNavigation(view) && YTKACEIsMessagesToken(token))) {
-        return YES;
-    }
     if (![view isKindOfClass:UIButton.class] &&
         ![view isKindOfClass:UIImageView.class]) return NO;
+    NSString *ident = view.accessibilityIdentifier;
+    NSString *label = view.accessibilityLabel;
+    if ([ident containsString:@"account"] ||
+        [ident containsString:@"avatar"] ||
+        [ident containsString:@"profile"] ||
+        [ident containsString:@"logo"]) return NO;
+    if ([label containsString:@"account"] ||
+        [label containsString:@"avatar"] ||
+        [label containsString:@"profile"] ||
+        [label containsString:@"logo"]) return NO;
+    if ([ident containsString:@"notification"] ||
+        [ident containsString:@"bell"] ||
+        [ident containsString:@"search"] ||
+        [ident containsString:@"cast"] ||
+        [ident containsString:@"airplay"] ||
+        [ident containsString:@"routebutton"] ||
+        (YTKACEInsideRightNavigation(view) && YTKACEIsMessagesToken(ident ?: @""))) {
+        return YES;
+    }
+    if ([label containsString:@"notification"] ||
+        [label containsString:@"bell"] ||
+        [label containsString:@"search"] ||
+        [label containsString:@"cast"] ||
+        [label containsString:@"airplay"] ||
+        [label containsString:@"routebutton"] ||
+        (YTKACEInsideRightNavigation(view) && YTKACEIsMessagesToken(label ?: @""))) {
+        return YES;
+    }
     for (UIView *ancestor = view.superview; ancestor != nil;
          ancestor = ancestor.superview) {
         NSString *name = NSStringFromClass(ancestor.class).lowercaseString;
@@ -342,7 +353,20 @@ static void YTKACEApplyNavigationTint(UIView *view, UIColor *color) {
     }
 }
 
+static inline BOOL YTKACEIsPrunableNavigationSubtree(UIView *view) {
+    if ([view isKindOfClass:UICollectionView.class] ||
+        [view isKindOfClass:UITableView.class]) {
+        return YES;
+    }
+    NSString *name = NSStringFromClass(view.class);
+    return [name isEqualToString:@"YTWatchView"] ||
+           [name isEqualToString:@"YTMainAppVideoPlayerOverlayView"] ||
+           [name isEqualToString:@"YTMainAppControlsOverlayView"] ||
+           [name isEqualToString:@"YTElementsSectionListCell"];
+}
+
 static void YTKACEApplyNavigationTree(UIView *view) {
+    if (view == nil || view.hidden) return;
     if ([NSStringFromClass(view.class) isEqualToString:@"YTRightNavigationButtons"]) {
         YTKACEApplyNavigationSelectors(view);
     }
@@ -350,6 +374,9 @@ static void YTKACEApplyNavigationTree(UIView *view) {
     if (YTKACEFeatureEnabled(YTKACEOLEDKey) &&
         YTKACEIsNavigationIcon(view)) {
         YTKACEApplyNavigationTint(view, YTKACENavigationForeground(view));
+    }
+    if (YTKACEIsPrunableNavigationSubtree(view)) {
+        return;
     }
     for (UIView *subview in view.subviews) {
         YTKACEApplyNavigationTree(subview);

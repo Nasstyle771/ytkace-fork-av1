@@ -7,82 +7,54 @@
 #import <objc/runtime.h>
 #import <string.h>
 
-static NSMutableDictionary<NSString *, NSValue *> *YTKACEOLEDOriginals;
+static CFMutableDictionaryRef s_originalHooksMap = NULL;
 static IMP OriginalQualitySheetDidAppear;
 static IMP OriginalAppTraitChanged;
 static IMP OriginalAppStatusBarStyle;
 static IMP OriginalPivotBarItemSelect;
 
-static NSValue *YTKACEOLEDValue(IMP implementation) {
-    return [NSValue value:&implementation withObjCType:@encode(IMP)];
+static UIColor *s_dynamicThemeBgColor = nil;
+static UIColor *s_dynamicThemeSurfaceColor = nil;
+static UIColor *s_dynamicAccentColor = nil;
+
+static inline void YTKACERegisterOriginal(SEL selector, IMP implementation) {
+    if (s_originalHooksMap != NULL && selector != NULL && implementation != NULL) {
+        CFDictionarySetValue(s_originalHooksMap, (const void *)selector, (const void *)implementation);
+    }
 }
 
-static IMP YTKACEOLEDImplementation(NSValue *value) {
-    IMP implementation = NULL;
-    [value getValue:&implementation];
-    return implementation;
+static inline IMP YTKACEGetOriginal(SEL selector) {
+    if (s_originalHooksMap == NULL || selector == NULL) return NULL;
+    return (IMP)CFDictionaryGetValue(s_originalHooksMap, (const void *)selector);
 }
 
-static NSString *YTKACEOLEDOriginalKey(id receiver, SEL selector) {
-    BOOL classMethod = object_isClass(receiver);
-    Class cls = classMethod ? receiver : [receiver class];
-    return [NSString stringWithFormat:@"%@|%@|%@",
-            classMethod ? @"+" : @"-",
-            NSStringFromClass(cls),
-            NSStringFromSelector(selector)];
-}
-
-static BOOL YTKACEIsSurfaceSelector(SEL selector) {
-    const char *name = sel_getName(selector);
-    if (name == NULL) return NO;
-    return (strstr(name, "menu") != NULL ||
-            strstr(name, "dialog") != NULL ||
-            strstr(name, "elevated") != NULL ||
-            strstr(name, "raised") != NULL ||
-            strstr(name, "Surface") != NULL ||
-            strstr(name, "Container") != NULL ||
-            strstr(name, "chip") != NULL ||
-            strstr(name, "overlay") != NULL ||
-            strstr(name, "Secondary") != NULL ||
-            strstr(name, "background2") != NULL ||
-            strstr(name, "background3") != NULL);
-}
-
-static UIColor *YTKACEOLEDColor(id receiver, SEL selector) {
-    IMP original = YTKACEOLEDImplementation(
-        YTKACEOLEDOriginals[YTKACEOLEDOriginalKey(receiver, selector)]
-    );
-    UIColor *base = original == NULL
-        ? nil
-        : ((id (*)(id, SEL))original)(receiver, selector);
-    if (!YTKACEOLEDActive(nil)) return base;
-    __weak id weakReceiver = receiver;
-    BOOL isSurface = YTKACEIsSurfaceSelector(selector);
-    return [UIColor colorWithDynamicProvider:^UIColor *(UITraitCollection *traits) {
-        if (YTKACEOLEDActive(traits)) {
-            return isSurface ? YTKACEThemeSurfaceColor(traits) : YTKACEThemeBackgroundColor(traits);
+static UIColor *YTKACEOLEDBgColor(id receiver, SEL selector) {
+    if (!YTKACEOLEDActive(nil)) {
+        IMP original = YTKACEGetOriginal(selector);
+        if (original != NULL) {
+            return ((id (*)(id, SEL))original)(receiver, selector);
         }
-        id target = weakReceiver;
-        UIColor *current = target == nil || original == NULL
-            ? base
-            : ((id (*)(id, SEL))original)(target, selector);
-        return current == nil ? [UIColor.systemBackgroundColor
-            resolvedColorWithTraitCollection:traits]
-            : [current resolvedColorWithTraitCollection:traits];
-    }];
+    }
+    return s_dynamicThemeBgColor;
+}
+
+static UIColor *YTKACEOLEDSurfaceColor(id receiver, SEL selector) {
+    if (!YTKACEOLEDActive(nil)) {
+        IMP original = YTKACEGetOriginal(selector);
+        if (original != NULL) {
+            return ((id (*)(id, SEL))original)(receiver, selector);
+        }
+    }
+    return s_dynamicThemeSurfaceColor;
 }
 
 static UIColor *YTKACEAccentColorHook(id receiver, SEL selector) {
     id presetVal = YTKACEPreferenceObject(YTKACEAccentPresetKey);
     NSInteger preset = [presetVal respondsToSelector:@selector(integerValue)] ? [presetVal integerValue] : 0;
     if (preset > 0) {
-        return [UIColor colorWithDynamicProvider:^UIColor *(UITraitCollection *traits) {
-            return YTKACEAppAccentColorForTraits(traits);
-        }];
+        return s_dynamicAccentColor;
     }
-    IMP original = YTKACEOLEDImplementation(
-        YTKACEOLEDOriginals[YTKACEOLEDOriginalKey(receiver, selector)]
-    );
+    IMP original = YTKACEGetOriginal(selector);
     return original == NULL ? YTKACEAppAccentColor() : ((id (*)(id, SEL))original)(receiver, selector);
 }
 
@@ -104,10 +76,9 @@ static NSInteger YTKACEAppStatusBarStyle(UIViewController *receiver,
         : ((NSInteger (*)(id, SEL))OriginalAppStatusBarStyle)(receiver, selector);
     if (!YTKACEOLEDActive(receiver.traitCollection)) return original;
     UIUserInterfaceStyle style = receiver.traitCollection.userInterfaceStyle;
-    NSInteger result = style == UIUserInterfaceStyleDark
+    return style == UIUserInterfaceStyleDark
         ? UIStatusBarStyleLightContent
         : UIStatusBarStyleDarkContent;
-    return result;
 }
 
 static void YTKACERefreshAllThemeViews(void) {
@@ -118,7 +89,6 @@ static void YTKACERefreshAllThemeViews(void) {
             for (UIWindow *window in ((UIWindowScene *)scene).windows) {
                 YTKACERefreshStatusBars(window.rootViewController);
                 [window setNeedsLayout];
-                [window layoutIfNeeded];
             }
         }
         YTKACERefreshNavigationAppearance();
@@ -138,96 +108,56 @@ static void YTKACEAppTraitChanged(UIViewController *receiver,
     [receiver setNeedsStatusBarAppearanceUpdate];
     [receiver.view setNeedsLayout];
     YTKACERefreshNavigationAppearance();
-    YTKACERefreshAllThemeViews();
 }
 
 static void YTKACEInstallColorHook(NSString *className,
                                    NSString *selectorName,
-                                   BOOL classMethod) {
+                                   BOOL classMethod,
+                                   BOOL isSurface) {
+    SEL selector = NSSelectorFromString(selectorName);
+    IMP replacement = isSurface ? (IMP)YTKACEOLEDSurfaceColor : (IMP)YTKACEOLEDBgColor;
     IMP original = NULL;
     BOOL installed = classMethod
-        ? YTKACEInstallClassHook(className,
-                                selectorName,
-                                (IMP)YTKACEOLEDColor,
-                                &original)
-        : YTKACEInstallInstanceHook(className,
-                                   selectorName,
-                                   (IMP)YTKACEOLEDColor,
-                                   &original);
-    if (!installed || original == NULL) {
-        return;
-    }
-    NSString *key = [NSString stringWithFormat:@"%@|%@|%@",
-                     classMethod ? @"+" : @"-",
-                     className,
-                     selectorName];
-    if (YTKACEOLEDOriginals[key] == nil) {
-        YTKACEOLEDOriginals[key] = YTKACEOLEDValue(original);
+        ? YTKACEInstallClassHook(className, selectorName, replacement, &original)
+        : YTKACEInstallInstanceHook(className, selectorName, replacement, &original);
+    if (installed && original != NULL) {
+        YTKACERegisterOriginal(selector, original);
     }
 }
 
 static void YTKACEInstallAccentHook(NSString *className,
                                     NSString *selectorName,
                                     BOOL classMethod) {
+    SEL selector = NSSelectorFromString(selectorName);
     IMP original = NULL;
     BOOL installed = classMethod
-        ? YTKACEInstallClassHook(className,
-                                selectorName,
-                                (IMP)YTKACEAccentColorHook,
-                                &original)
-        : YTKACEInstallInstanceHook(className,
-                                   selectorName,
-                                   (IMP)YTKACEAccentColorHook,
-                                   &original);
-    if (!installed || original == NULL) {
-        return;
-    }
-    NSString *key = [NSString stringWithFormat:@"%@|%@|%@",
-                     classMethod ? @"+" : @"-",
-                     className,
-                     selectorName];
-    if (YTKACEOLEDOriginals[key] == nil) {
-        YTKACEOLEDOriginals[key] = YTKACEOLEDValue(original);
+        ? YTKACEInstallClassHook(className, selectorName, (IMP)YTKACEAccentColorHook, &original)
+        : YTKACEInstallInstanceHook(className, selectorName, (IMP)YTKACEAccentColorHook, &original);
+    if (installed && original != NULL) {
+        YTKACERegisterOriginal(selector, original);
     }
 }
 
-static void YTKACECollectQualityLabels(UIView *view,
-                                       NSMutableArray<UILabel *> *labels) {
+static void YTKACECollectQualityLabelsFast(UIView *view,
+                                           NSMutableArray<UILabel *> *labels,
+                                           NSRegularExpression *pattern) {
     if ([view isKindOfClass:UILabel.class]) {
         UILabel *label = (UILabel *)view;
         NSString *text = label.text ?: @"";
-        NSRegularExpression *pattern = [NSRegularExpression
-            regularExpressionWithPattern:@"^\\s*\\d{3,4}p(?:60)?" options:0 error:nil];
-        if ([text localizedCaseInsensitiveContainsString:@"quality"] ||
-            [pattern firstMatchInString:text options:0
-                range:NSMakeRange(0, text.length)] != nil) {
-            [labels addObject:label];
+        if ([text containsString:@"p"] || [text localizedCaseInsensitiveContainsString:@"quality"]) {
+            if ([text localizedCaseInsensitiveContainsString:@"quality"] ||
+                [pattern firstMatchInString:text options:0 range:NSMakeRange(0, text.length)] != nil) {
+                [labels addObject:label];
+            }
         }
     }
     for (UIView *child in view.subviews) {
-        YTKACECollectQualityLabels(child, labels);
+        YTKACECollectQualityLabelsFast(child, labels, pattern);
     }
-}
-
-static UIView *YTKACECommonAncestor(NSArray<UIView *> *views, UIView *limit) {
-    UIView *candidate = views.firstObject;
-    while (candidate != nil && candidate != limit.superview) {
-        BOOL containsAll = YES;
-        for (UIView *view in views) {
-            if (view != candidate && ![view isDescendantOfView:candidate]) {
-                containsAll = NO;
-                break;
-            }
-        }
-        if (containsAll) return candidate;
-        candidate = candidate.superview;
-    }
-    return nil;
 }
 
 static void YTKACEBlackenQualitySurface(UIView *view) {
     UIColor *surfaceColor = YTKACEThemeSurfaceColor(view.traitCollection);
-    UIColor *bgColor = YTKACEThemeBackgroundColor(view.traitCollection);
     if ([view isKindOfClass:UIVisualEffectView.class]) {
         UIVisualEffectView *effect = (UIVisualEffectView *)view;
         effect.effect = nil;
@@ -256,30 +186,29 @@ static void YTKACEQualitySheetDidAppear(id receiver, SEL selector, BOOL animated
         !YTKACEOLEDActive(((UIViewController *)receiver).traitCollection)) return;
     UIView *root = ((UIViewController *)receiver).view;
     dispatch_async(dispatch_get_main_queue(), ^{
+        static NSRegularExpression *qualityPattern;
+        static dispatch_once_t patToken;
+        dispatch_once(&patToken, ^{
+            qualityPattern = [NSRegularExpression
+                regularExpressionWithPattern:@"^\\s*\\d{3,4}p(?:60)?" options:0 error:nil];
+        });
         NSMutableArray<UILabel *> *labels = [NSMutableArray array];
-        YTKACECollectQualityLabels(root, labels);
+        YTKACECollectQualityLabelsFast(root, labels, qualityPattern);
         NSUInteger qualityRows = 0;
         for (UILabel *label in labels) {
             if ([label.text rangeOfString:@"p"].location != NSNotFound) qualityRows++;
         }
         if (qualityRows < 2) return;
-        UIView *surface = YTKACECommonAncestor(labels, root);
-        if (surface == nil || surface == root) {
-            for (UIView *child in root.subviews) {
-                NSUInteger count = 0;
-                for (UILabel *label in labels) {
-                    if ([label isDescendantOfView:child]) count++;
-                }
-                if (count == labels.count) {
-                    surface = child;
-                    break;
-                }
-            }
+        UIView *container = labels.firstObject.superview;
+        while (container != nil && container != root &&
+               ![container isKindOfClass:UITableView.class] &&
+               ![container isKindOfClass:UICollectionView.class] &&
+               ![container isKindOfClass:UIScrollView.class]) {
+            container = container.superview;
         }
-        if (surface != nil && surface != root) {
-            surface.backgroundColor = YTKACEThemeSurfaceColor(root.traitCollection);
-            YTKACEBlackenQualitySurface(surface);
-        }
+        UIView *surface = container ?: root;
+        surface.backgroundColor = YTKACEThemeSurfaceColor(root.traitCollection);
+        YTKACEBlackenQualitySurface(surface);
     });
 }
 
@@ -297,7 +226,25 @@ static void YTKACEPivotBarItemSetSelected(UIView *receiver, SEL selector, BOOL s
 void YTKACEInstallOLEDHooks(void) {
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
-        YTKACEOLEDOriginals = [NSMutableDictionary dictionary];
+        s_originalHooksMap = CFDictionaryCreateMutable(kCFAllocatorDefault, 0, NULL, NULL);
+
+        s_dynamicThemeBgColor = [UIColor colorWithDynamicProvider:^UIColor *(UITraitCollection *traits) {
+            if (YTKACEOLEDActive(traits)) {
+                return YTKACEThemeBackgroundColor(traits);
+            }
+            return YTKACEInterfaceBackgroundColor(traits);
+        }];
+
+        s_dynamicThemeSurfaceColor = [UIColor colorWithDynamicProvider:^UIColor *(UITraitCollection *traits) {
+            if (YTKACEOLEDActive(traits)) {
+                return YTKACEThemeSurfaceColor(traits);
+            }
+            return YTKACEInterfaceSurfaceColor(traits);
+        }];
+
+        s_dynamicAccentColor = [UIColor colorWithDynamicProvider:^UIColor *(UITraitCollection *traits) {
+            return YTKACEAppAccentColorForTraits(traits);
+        }];
 
         [NSNotificationCenter.defaultCenter
             addObserverForName:YTKACEPreferencesDidChangeNotification
@@ -313,10 +260,10 @@ void YTKACEInstallOLEDHooks(void) {
     });
 
     for (NSString *selector in @[@"black0", @"black1", @"black2", @"black3", @"black4"]) {
-        YTKACEInstallColorHook(@"YTColor", selector, YES);
+        YTKACEInstallColorHook(@"YTColor", selector, YES, NO);
     }
 
-    NSArray<NSString *> *paletteSelectors = @[
+    NSArray<NSString *> *bgPaletteSelectors = @[
         @"baseBackground",
         @"brandBackgroundPrimary",
         @"brandBackgroundSecondary",
@@ -328,14 +275,21 @@ void YTKACEInstallOLEDHooks(void) {
         @"staticBrandBlack",
         @"generalBackgroundA",
         @"generalBackgroundB",
-        @"generalBackgroundC",
+        @"generalBackgroundC"
+    ];
+    for (NSString *selector in bgPaletteSelectors) {
+        YTKACEInstallColorHook(@"YTCommonColorPalette", selector, NO, NO);
+        YTKACEInstallColorHook(@"YTCommonColorPalette", selector, YES, NO);
+    }
+
+    NSArray<NSString *> *surfacePaletteSelectors = @[
         @"menuBackground",
         @"dialogBackgroundColor",
         @"elevatedBackgroundColor"
     ];
-    for (NSString *selector in paletteSelectors) {
-        YTKACEInstallColorHook(@"YTCommonColorPalette", selector, NO);
-        YTKACEInstallColorHook(@"YTCommonColorPalette", selector, YES);
+    for (NSString *selector in surfacePaletteSelectors) {
+        YTKACEInstallColorHook(@"YTCommonColorPalette", selector, NO, YES);
+        YTKACEInstallColorHook(@"YTCommonColorPalette", selector, YES, YES);
     }
 
     // Accent color hooks

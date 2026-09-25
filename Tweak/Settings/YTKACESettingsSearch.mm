@@ -6,11 +6,15 @@
 #import <objc/message.h>
 #import <objc/runtime.h>
 
+#include <os/lock.h>
+
 static UIViewController *YTKACEControllerForPageID(NSString *pageID) {
     static NSDictionary<NSString *, UIViewController *(^)(void)> *builders;
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
         builders = @{
+            @"appearance": ^UIViewController *{ return YTKACEMakeAppearanceOptionsController(); },
+            @"display": ^UIViewController *{ return YTKACEMakeDisplayRateOptionsController(); },
             @"sponsorblock": ^UIViewController *{ return YTKACEMakeSponsorBlockController(); },
             @"player": ^UIViewController *{ return YTKACEMakePlayerControlsController(); },
             @"overlay": ^UIViewController *{ return YTKACEMakeOverlayOptionsController(); },
@@ -25,47 +29,197 @@ static UIViewController *YTKACEControllerForPageID(NSString *pageID) {
     return builder != nil ? builder() : nil;
 }
 
-static NSArray<NSDictionary *> *YTKACESearchIndex(void) {
-    NSMutableArray<NSDictionary *> *records = [NSMutableArray array];
+@interface YTKACEIndexedItem : NSObject
+@property(nonatomic, strong) NSDictionary *record;
+@property(nonatomic, copy) NSString *normalizedTitle;
+@property(nonatomic, copy) NSString *normalizedSubtitle;
+@property(nonatomic, copy) NSString *normalizedHeader;
+@property(nonatomic, copy) NSString *normalizedPageTitle;
+@property(nonatomic, copy) NSArray<NSString *> *titleTokens;
+@property(nonatomic, copy) NSArray<NSString *> *subtitleTokens;
+@property(nonatomic, copy) NSArray<NSString *> *keywords;
+@end
+
+@implementation YTKACEIndexedItem
+@end
+
+static NSString *YTKACENormalizeString(NSString *input) {
+    if (input.length == 0) return @"";
+    NSMutableString *s = [input mutableCopy];
+    CFStringTransform((__bridge CFMutableStringRef)s, NULL, kCFStringTransformStripCombiningMarks, NO);
+    return [s.lowercaseString stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+}
+
+static NSArray<NSString *> *YTKACETokenizeString(NSString *input) {
+    NSString *normalized = YTKACENormalizeString(input);
+    if (normalized.length == 0) return @[];
+    NSCharacterSet *delimiters = [NSCharacterSet characterSetWithCharactersInString:@" \t\r\n-_/\\()[]{},.:;\"'•›"];
+    NSArray *components = [normalized componentsSeparatedByCharactersInSet:delimiters];
+    NSMutableArray<NSString *> *tokens = [NSMutableArray arrayWithCapacity:components.count];
+    for (NSString *tok in components) {
+        if (tok.length > 0) {
+            [tokens addObject:tok];
+        }
+    }
+    return tokens;
+}
+
+static NSArray<YTKACEIndexedItem *> *s_cachedIndex = nil;
+static NSString *s_lastIndexedLanguage = nil;
+static os_unfair_lock s_indexLock = OS_UNFAIR_LOCK_INIT;
+
+static NSArray<YTKACEIndexedItem *> *YTKACEGetOrBuildSearchIndex(void) {
+    NSString *currentLanguage = YTKACEPreferenceObject(@"YTKACE.Preference.Language") ?: @"system";
+    os_unfair_lock_lock(&s_indexLock);
+    if (s_cachedIndex != nil && [currentLanguage isEqualToString:s_lastIndexedLanguage]) {
+        NSArray<YTKACEIndexedItem *> *result = s_cachedIndex;
+        os_unfair_lock_unlock(&s_indexLock);
+        return result;
+    }
+
+    NSMutableArray<YTKACEIndexedItem *> *items = [NSMutableArray array];
     for (NSDictionary *page in YTKACEAllPageDefinitions()) {
         NSArray *sections = page[@"sections"];
         NSArray *headers = page[@"headers"];
-        NSString *pageTitle = YTKACELocalized(page[@"title"]);
+        NSString *rawPageTitle = page[@"title"] ?: @"";
+        NSString *pageTitle = YTKACELocalized(rawPageTitle);
+        NSString *pageID = page[@"id"] ?: @"";
+
         for (NSUInteger section = 0; section < sections.count; section++) {
-            NSArray *items = sections[section];
-            NSString *header = section < headers.count
-                ? YTKACELocalized(headers[section]) : @"";
-            for (NSUInteger row = 0; row < items.count; row++) {
-                NSDictionary *item = items[row];
+            NSArray *sectionItems = sections[section];
+            NSString *rawHeader = section < headers.count ? headers[section] : @"";
+            NSString *header = rawHeader.length != 0 ? YTKACELocalized(rawHeader) : @"";
+
+            for (NSUInteger row = 0; row < sectionItems.count; row++) {
+                NSDictionary *item = sectionItems[row];
                 NSString *title = item[@"title"];
                 if (![title isKindOfClass:NSString.class] || title.length == 0) continue;
                 if ([item[@"type"] isEqualToString:@"text"]) continue;
                 NSString *subtitle = [item[@"subtitle"] isKindOfClass:NSString.class]
                     ? item[@"subtitle"] : @"";
-                [records addObject:@{
+
+                NSDictionary *record = @{
                     @"item": item,
-                    @"pageID": page[@"id"],
+                    @"pageID": pageID,
                     @"pageTitle": pageTitle,
                     @"header": header,
                     @"title": title,
                     @"subtitle": subtitle,
                     @"section": @(section),
                     @"row": @(row)
-                }];
+                };
+
+                YTKACEIndexedItem *indexed = [YTKACEIndexedItem new];
+                indexed.record = record;
+                indexed.normalizedTitle = YTKACENormalizeString(title);
+                indexed.normalizedSubtitle = YTKACENormalizeString(subtitle);
+                indexed.normalizedHeader = YTKACENormalizeString(header);
+                indexed.normalizedPageTitle = YTKACENormalizeString(pageTitle);
+                indexed.titleTokens = YTKACETokenizeString(title);
+                indexed.subtitleTokens = YTKACETokenizeString(subtitle);
+
+                NSMutableArray<NSString *> *kw = [NSMutableArray array];
+                if ([pageID isEqualToString:@"display"]) {
+                    [kw addObjectsFromArray:@[@"120hz", @"120", @"promotion", @"fps", @"smooth", @"scroll", @"hz", @"hertz", @"cadence", @"adaptive", @"refresh"]];
+                } else if ([pageID isEqualToString:@"appearance"]) {
+                    [kw addObjectsFromArray:@[@"oled", @"theme", @"preset", @"accent", @"color", @"custom", @"hex", @"navy", @"black", @"surface"]];
+                } else if ([pageID isEqualToString:@"playback"]) {
+                    [kw addObjectsFromArray:@[@"codec", @"av1", @"vp9", @"h264", @"buffer", @"boost", @"bitrate", @"quality"]];
+                }
+                indexed.keywords = kw;
+
+                [items addObject:indexed];
             }
         }
     }
-    return records;
+    s_cachedIndex = [items copy];
+    s_lastIndexedLanguage = [currentLanguage copy];
+    os_unfair_lock_unlock(&s_indexLock);
+    return s_cachedIndex;
 }
 
-static NSInteger YTKACEMatchScore(NSDictionary *record, NSString *query) {
-    NSStringCompareOptions options = NSCaseInsensitiveSearch | NSDiacriticInsensitiveSearch;
-    NSRange inTitle = [record[@"title"] rangeOfString:query options:options];
-    if (inTitle.location == 0) return 0;
-    if (inTitle.location != NSNotFound) return 1;
-    if ([record[@"subtitle"] rangeOfString:query options:options].location != NSNotFound) return 2;
-    if ([record[@"header"] rangeOfString:query options:options].location != NSNotFound ||
-        [record[@"pageTitle"] rangeOfString:query options:options].location != NSNotFound) return 3;
+static NSInteger YTKACEEvaluateMatchScore(YTKACEIndexedItem *item, NSString *normalizedQuery, NSArray<NSString *> *queryTokens) {
+    if (normalizedQuery.length == 0) return NSNotFound;
+
+    // 0: Exact title match
+    if ([item.normalizedTitle isEqualToString:normalizedQuery]) {
+        return 0;
+    }
+
+    // 10: Title prefix match
+    if ([item.normalizedTitle hasPrefix:normalizedQuery]) {
+        return 10;
+    }
+
+    // 20: Any title word starts with query
+    for (NSString *tok in item.titleTokens) {
+        if ([tok hasPrefix:normalizedQuery]) {
+            return 20;
+        }
+    }
+
+    // 30: Title contains query substring
+    if ([item.normalizedTitle rangeOfString:normalizedQuery].location != NSNotFound) {
+        return 30;
+    }
+
+    // 40: Any keyword starts with query or matches
+    for (NSString *kw in item.keywords) {
+        if ([kw hasPrefix:normalizedQuery] || [kw isEqualToString:normalizedQuery]) {
+            return 40;
+        }
+    }
+
+    // 50: Any subtitle token starts with query
+    for (NSString *tok in item.subtitleTokens) {
+        if ([tok hasPrefix:normalizedQuery]) {
+            return 50;
+        }
+    }
+
+    // 60: Subtitle contains query
+    if ([item.normalizedSubtitle rangeOfString:normalizedQuery].location != NSNotFound) {
+        return 60;
+    }
+
+    // 70: Header or Page Title match
+    if ([item.normalizedHeader hasPrefix:normalizedQuery] ||
+        [item.normalizedPageTitle hasPrefix:normalizedQuery]) {
+        return 70;
+    }
+    if ([item.normalizedHeader rangeOfString:normalizedQuery].location != NSNotFound ||
+        [item.normalizedPageTitle rangeOfString:normalizedQuery].location != NSNotFound) {
+        return 80;
+    }
+
+    // Multi-token query evaluation: all tokens match title, subtitle or keywords
+    if (queryTokens.count > 1) {
+        BOOL allMatched = YES;
+        for (NSString *qTok in queryTokens) {
+            BOOL tokenFound = NO;
+            for (NSString *tTok in item.titleTokens) {
+                if ([tTok hasPrefix:qTok]) { tokenFound = YES; break; }
+            }
+            if (!tokenFound) {
+                for (NSString *sTok in item.subtitleTokens) {
+                    if ([sTok hasPrefix:qTok]) { tokenFound = YES; break; }
+                }
+            }
+            if (!tokenFound) {
+                for (NSString *kw in item.keywords) {
+                    if ([kw hasPrefix:qTok]) { tokenFound = YES; break; }
+                }
+            }
+            if (!tokenFound) {
+                allMatched = NO;
+                break;
+            }
+        }
+        if (allMatched) {
+            return 45;
+        }
+    }
+
     return NSNotFound;
 }
 
@@ -73,14 +227,20 @@ NSArray<NSDictionary *> *YTKACEFilterSettings(NSString *query) {
     NSString *trimmed = [query stringByTrimmingCharactersInSet:
         NSCharacterSet.whitespaceCharacterSet];
     if (trimmed.length == 0) return @[];
-    NSMutableArray<NSDictionary *> *scored = [NSMutableArray array];
-    for (NSDictionary *record in YTKACESearchIndex()) {
-        NSInteger score = YTKACEMatchScore(record, trimmed);
+
+    NSString *normalizedQuery = YTKACENormalizeString(trimmed);
+    NSArray<NSString *> *queryTokens = YTKACETokenizeString(trimmed);
+    NSArray<YTKACEIndexedItem *> *index = YTKACEGetOrBuildSearchIndex();
+
+    NSMutableArray<NSDictionary *> *scored = [NSMutableArray arrayWithCapacity:index.count];
+    for (YTKACEIndexedItem *indexed in index) {
+        NSInteger score = YTKACEEvaluateMatchScore(indexed, normalizedQuery, queryTokens);
         if (score == NSNotFound) continue;
-        NSMutableDictionary *entry = [record mutableCopy];
+        NSMutableDictionary *entry = [indexed.record mutableCopy];
         entry[@"score"] = @(score);
         [scored addObject:entry];
     }
+
     [scored sortUsingComparator:^NSComparisonResult(NSDictionary *a, NSDictionary *b) {
         NSComparisonResult order = [a[@"score"] compare:b[@"score"]];
         return order != NSOrderedSame ? order : [a[@"title"] compare:b[@"title"]];

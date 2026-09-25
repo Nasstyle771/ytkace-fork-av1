@@ -8,40 +8,39 @@ static IMP OriginalImageNamedBundleTraits;
 static IMP OriginalImageNamedBundle;
 
 static NSBundle *YTKACEInnertubeBundle(void) {
-    NSBundle *main = NSBundle.mainBundle;
-    NSArray<NSString *> *paths = @[
-        [main.resourcePath stringByAppendingPathComponent:@"Innertube_Resources.bundle"],
-        [main.resourcePath stringByAppendingPathComponent:@"Frameworks/Module_Framework.framework/Innertube_Resources.bundle"]
-    ];
-    for (NSString *path in paths) {
-        NSBundle *bundle = [NSBundle bundleWithPath:path];
-        if (bundle != nil) {
-            return bundle;
+    static NSBundle *s_cachedBundle = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        NSBundle *main = NSBundle.mainBundle;
+        NSString *path1 = [main.resourcePath stringByAppendingPathComponent:@"Innertube_Resources.bundle"];
+        s_cachedBundle = [NSBundle bundleWithPath:path1];
+        if (s_cachedBundle == nil) {
+            NSString *path2 = [main.resourcePath stringByAppendingPathComponent:@"Frameworks/Module_Framework.framework/Innertube_Resources.bundle"];
+            s_cachedBundle = [NSBundle bundleWithPath:path2];
         }
-    }
-    return nil;
+    });
+    return s_cachedBundle;
 }
 
-static NSString *YTKACEPremiumName(NSString *name,
-                                    UITraitCollection *traits) {
-    BOOL darkName = [name.lowercaseString containsString:@"dark"];
+static inline NSString *YTKACEPremiumName(NSString *name, UITraitCollection *traits) {
+    BOOL darkName = [name rangeOfString:@"dark" options:NSCaseInsensitiveSearch].location != NSNotFound;
     BOOL darkMode = NO;
     if (@available(iOS 13.0, *)) {
         darkMode = traits.userInterfaceStyle == UIUserInterfaceStyleDark;
     }
-    return darkName || darkMode
-        ? @"youtube_premium_logo_white"
-        : @"youtube_premium_logo";
+    return (darkName || darkMode) ? @"youtube_premium_logo_white" : @"youtube_premium_logo";
 }
 
-static BOOL YTKACEShouldReplaceLogo(NSString *name) {
-    if (!YTKACEFeatureEnabled(@"YTKACE.Preference.Navigation.PremiumLogo") ||
-        ![name isKindOfClass:NSString.class]) {
+static inline BOOL YTKACEShouldReplaceLogo(NSString *name) {
+    if (name.length == 0 || ![name isKindOfClass:NSString.class]) return NO;
+    // Fast path: 99% of images do not contain "youtube_logo"
+    if ([name rangeOfString:@"youtube_logo" options:NSCaseInsensitiveSearch].location == NSNotFound) {
         return NO;
     }
-    NSString *lower = name.lowercaseString;
-    return [lower containsString:@"youtube_logo"] &&
-        ![lower containsString:@"premium"];
+    if ([name rangeOfString:@"premium" options:NSCaseInsensitiveSearch].location != NSNotFound) {
+        return NO;
+    }
+    return YTKACEFeatureEnabled(@"YTKACE.Preference.Navigation.PremiumLogo");
 }
 
 static UIImage *YTKACEImageNamedBundleTraits(id receiver,

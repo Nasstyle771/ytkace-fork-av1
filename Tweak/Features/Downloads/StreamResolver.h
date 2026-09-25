@@ -22,6 +22,7 @@ NS_ASSUME_NONNULL_BEGIN
 @property(nonatomic, assign, readonly) BOOL isAV1;
 @property(nonatomic, assign, readonly) BOOL isVP9;
 @property(nonatomic, assign, readonly) BOOL isH264;
+@property(nonatomic, assign, readonly) BOOL isHardwareDecodeSupported;
 @property(nonatomic, copy) NSString *codecLabel;
 @end
 

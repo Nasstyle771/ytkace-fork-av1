@@ -649,244 +649,289 @@ willDisplayHeaderView:(UIView *)view
          cellForRowAtIndexPath:(NSIndexPath *)indexPath {
     NSDictionary *item = _sections[(NSUInteger)indexPath.section][(NSUInteger)indexPath.row];
     NSString *type = item[@"type"];
-    UITableViewCellStyle style;
-    if ([type isEqualToString:@"picker"]) {
-        style = [item[@"subtitle"] length] == 0
-            ? UITableViewCellStyleValue1
-            : UITableViewCellStyleSubtitle;
+    NSString *subtitle = item[@"subtitle"];
+    BOOL hasSubtitle = subtitle.length > 0;
+
+    NSString *identifier = nil;
+    UITableViewCellStyle style = hasSubtitle ? UITableViewCellStyleSubtitle : UITableViewCellStyleDefault;
+
+    if ([type isEqualToString:@"toggle"]) {
+        identifier = @"YTKACECell-Toggle";
+    } else if ([type isEqualToString:@"segmented"]) {
+        identifier = [item[@"stacked"] boolValue] ? @"YTKACECell-Segmented-Stacked" : @"YTKACECell-Segmented-Inline";
+    } else if ([type isEqualToString:@"stepper"]) {
+        identifier = @"YTKACECell-Stepper";
+    } else if ([type isEqualToString:@"slider"]) {
+        identifier = [item[@"stacked"] boolValue] ? @"YTKACECell-Slider-Stacked" : @"YTKACECell-Slider-Inline";
+    } else if ([type isEqualToString:@"picker"]) {
+        style = hasSubtitle ? UITableViewCellStyleSubtitle : UITableViewCellStyleValue1;
+        identifier = hasSubtitle ? @"YTKACECell-Picker-Detail" : @"YTKACECell-Picker-Simple";
+    } else if ([type isEqualToString:@"color"]) {
+        identifier = @"YTKACECell-Color";
+    } else if ([type isEqualToString:@"text"]) {
+        identifier = @"YTKACECell-Text";
     } else {
-        style = [item[@"subtitle"] length] == 0
-            ? UITableViewCellStyleDefault
-            : UITableViewCellStyleSubtitle;
+        identifier = hasSubtitle ? @"YTKACECell-Default-Subtitle" : @"YTKACECell-Default";
     }
-    NSString *identifier = [NSString stringWithFormat:@"YTKACEOption-%ld", (long)style];
+
     UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:identifier];
     if (cell == nil) {
         cell = [[UITableViewCell alloc] initWithStyle:style reuseIdentifier:identifier];
-    }
+        cell.textLabel.font = [UIFont systemFontOfSize:17.0];
+        cell.detailTextLabel.font = [UIFont systemFontOfSize:12.0];
+        cell.textLabel.numberOfLines = 1;
+        cell.detailTextLabel.numberOfLines = 2;
+        cell.textLabel.textColor = UIColor.labelColor;
+        cell.detailTextLabel.textColor = UIColor.secondaryLabelColor;
+        cell.backgroundColor = YTKACESettingsCellBackground();
 
-    [[cell.contentView viewWithTag:8801] removeFromSuperview];
-    [[cell.contentView viewWithTag:8802] removeFromSuperview];
-    [[cell.contentView viewWithTag:4271] removeFromSuperview];
-
-    cell.textLabel.text = item[@"title"];
-    cell.detailTextLabel.text = item[@"subtitle"];
-    cell.textLabel.font = [UIFont systemFontOfSize:17.0];
-    cell.detailTextLabel.font = [UIFont systemFontOfSize:12.0];
-    cell.textLabel.numberOfLines = 1;
-    cell.detailTextLabel.numberOfLines = 2;
-    cell.textLabel.textColor = UIColor.labelColor;
-    cell.detailTextLabel.textColor = UIColor.secondaryLabelColor;
-    cell.backgroundColor = YTKACESettingsCellBackground();
-    cell.selectionStyle = UITableViewCellSelectionStyleDefault;
-    cell.accessoryType = UITableViewCellAccessoryNone;
-    cell.accessoryView = nil;
-    cell.imageView.image = nil;
-
-    if ([type isEqualToString:@"toggle"]) {
-        UISwitch *toggle = [UISwitch new];
-        toggle.transform = CGAffineTransformMakeScale(0.95, 0.95);
-        toggle.onTintColor = YTKACEAccentColor();
-        id stored = YTKACEPreferenceObject(item[@"key"]);
-        toggle.on = [stored respondsToSelector:@selector(boolValue)] && [stored boolValue];
-        objc_setAssociatedObject(toggle,
-                                 YTKACEItemAssociation,
-                                 item,
-                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        [toggle addTarget:self
-                   action:@selector(toggleChanged:)
-         forControlEvents:UIControlEventValueChanged];
-        cell.accessoryView = toggle;
-        cell.selectionStyle = UITableViewCellSelectionStyleNone;
-    } else if ([type isEqualToString:@"segmented"]) {
-        UISegmentedControl *control = [[UISegmentedControl alloc] initWithItems:item[@"titles"]];
-        id selected = YTKACEPreferenceObject(item[@"key"]);
-        NSUInteger selectedIndex = [item[@"values"] indexOfObject:selected];
-        control.selectedSegmentIndex = selectedIndex == NSNotFound
-            ? [item[@"default"] unsignedIntegerValue]
-            : selectedIndex;
-        objc_setAssociatedObject(control,
-                                 YTKACEItemAssociation,
-                                 item,
-                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        [control addTarget:self
-                    action:@selector(segmentChanged:)
-          forControlEvents:UIControlEventValueChanged];
-        if ([item[@"stacked"] boolValue]) {
+        if ([type isEqualToString:@"toggle"]) {
+            UISwitch *toggle = [UISwitch new];
+            toggle.transform = CGAffineTransformMakeScale(0.95, 0.95);
+            toggle.onTintColor = YTKACEAccentColor();
+            [toggle addTarget:self action:@selector(toggleChanged:) forControlEvents:UIControlEventValueChanged];
+            cell.accessoryView = toggle;
+            cell.selectionStyle = UITableViewCellSelectionStyleNone;
+        } else if ([type isEqualToString:@"stepper"]) {
+            UIStepper *stepper = [UIStepper new];
+            stepper.tintColor = YTKACEAccentColor();
+            [stepper addTarget:self action:@selector(stepperChanged:) forControlEvents:UIControlEventValueChanged];
+            cell.accessoryView = stepper;
+            cell.selectionStyle = UITableViewCellSelectionStyleNone;
+        } else if ([type isEqualToString:@"segmented"] && [item[@"stacked"] boolValue]) {
             UILabel *caption = [UILabel new];
             caption.tag = 8802;
-            caption.text = item[@"title"];
             caption.font = [UIFont systemFontOfSize:16.0];
             caption.textColor = UIColor.labelColor;
             caption.translatesAutoresizingMaskIntoConstraints = NO;
             [cell.contentView addSubview:caption];
+
+            UISegmentedControl *control = [UISegmentedControl new];
             control.tag = 8801;
             control.translatesAutoresizingMaskIntoConstraints = NO;
+            [control addTarget:self action:@selector(segmentChanged:) forControlEvents:UIControlEventValueChanged];
             [cell.contentView addSubview:control];
+
             UILayoutGuide *guide = cell.contentView.layoutMarginsGuide;
             [NSLayoutConstraint activateConstraints:@[
                 [caption.leadingAnchor constraintEqualToAnchor:guide.leadingAnchor],
                 [caption.trailingAnchor constraintEqualToAnchor:guide.trailingAnchor],
-                [caption.topAnchor constraintEqualToAnchor:cell.contentView.topAnchor
-                                                  constant:8.0],
+                [caption.topAnchor constraintEqualToAnchor:cell.contentView.topAnchor constant:8.0],
                 [control.leadingAnchor constraintEqualToAnchor:guide.leadingAnchor],
                 [control.trailingAnchor constraintEqualToAnchor:guide.trailingAnchor],
-                [control.topAnchor constraintEqualToAnchor:caption.bottomAnchor
-                                                  constant:8.0],
+                [control.topAnchor constraintEqualToAnchor:caption.bottomAnchor constant:8.0],
                 [control.heightAnchor constraintEqualToConstant:30.0]
             ]];
-            cell.textLabel.text = nil;
-            cell.accessoryView = nil;
+            cell.selectionStyle = UITableViewCellSelectionStyleNone;
+        } else if ([type isEqualToString:@"slider"] && [item[@"stacked"] boolValue]) {
+            UILabel *caption = [UILabel new];
+            caption.tag = 4272;
+            caption.font = [UIFont systemFontOfSize:16.0];
+            caption.textColor = UIColor.labelColor;
+
+            UILabel *readout = [UILabel new];
+            readout.tag = 4273;
+            readout.font = [UIFont monospacedDigitSystemFontOfSize:15.0 weight:UIFontWeightSemibold];
+            readout.textColor = YTKACEAccentColor();
+            readout.textAlignment = NSTextAlignmentRight;
+            [readout setContentCompressionResistancePriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
+
+            UISlider *slider = [UISlider new];
+            slider.tag = 4274;
+            slider.minimumTrackTintColor = YTKACEAccentColor();
+            [slider addTarget:self action:@selector(sliderChanged:) forControlEvents:UIControlEventValueChanged];
+
+            UIStackView *heading = [[UIStackView alloc] initWithArrangedSubviews:@[caption, readout]];
+            heading.axis = UILayoutConstraintAxisHorizontal;
+            heading.spacing = 8.0;
+
+            UIStackView *track = [[UIStackView alloc] initWithArrangedSubviews:@[
+                YTKACEStepControl(NO, slider, self, @selector(sliderStepped:)),
+                slider,
+                YTKACEStepControl(YES, slider, self, @selector(sliderStepped:))
+            ]];
+            track.axis = UILayoutConstraintAxisHorizontal;
+            track.alignment = UIStackViewAlignmentCenter;
+            track.spacing = 10.0;
+
+            UIStackView *container = [[UIStackView alloc] initWithArrangedSubviews:@[heading, track]];
+            container.tag = 4271;
+            container.axis = UILayoutConstraintAxisVertical;
+            container.spacing = 6.0;
+            container.translatesAutoresizingMaskIntoConstraints = NO;
+            [cell.contentView addSubview:container];
+
+            UILayoutGuide *guide = cell.contentView.layoutMarginsGuide;
+            [NSLayoutConstraint activateConstraints:@[
+                [container.leadingAnchor constraintEqualToAnchor:guide.leadingAnchor],
+                [container.trailingAnchor constraintEqualToAnchor:guide.trailingAnchor],
+                [container.topAnchor constraintEqualToAnchor:cell.contentView.topAnchor constant:8.0],
+                [container.bottomAnchor constraintEqualToAnchor:cell.contentView.bottomAnchor constant:-8.0]
+            ]];
+            cell.selectionStyle = UITableViewCellSelectionStyleNone;
+        } else if ([type isEqualToString:@"slider"]) {
+            UIView *accessory = [[UIView alloc] initWithFrame:CGRectMake(0.0, 0.0, 158.0, 46.0)];
+            UISlider *slider = [[UISlider alloc] initWithFrame:CGRectMake(0.0, 0.0, 158.0, 30.0)];
+            slider.tag = 4275;
+            slider.minimumTrackTintColor = YTKACEAccentColor();
+            [slider addTarget:self action:@selector(sliderChanged:) forControlEvents:UIControlEventValueChanged];
+
+            UILabel *valueLabel = [[UILabel alloc] initWithFrame:CGRectMake(0.0, 28.0, 158.0, 14.0)];
+            valueLabel.tag = 4276;
+            valueLabel.font = [UIFont systemFontOfSize:10.0];
+            valueLabel.textColor = UIColor.tertiaryLabelColor;
+            valueLabel.textAlignment = NSTextAlignmentRight;
+
+            [accessory addSubview:slider];
+            [accessory addSubview:valueLabel];
+            cell.accessoryView = accessory;
+            cell.selectionStyle = UITableViewCellSelectionStyleNone;
+        } else if ([type isEqualToString:@"picker"] && hasSubtitle) {
+            UILabel *value = [UILabel new];
+            value.tag = 4277;
+            value.font = [UIFont systemFontOfSize:15.0];
+            value.textColor = YTKACEAccentColor();
+            value.textAlignment = NSTextAlignmentRight;
+            cell.accessoryView = value;
+            cell.accessoryType = UITableViewCellAccessoryNone;
+        } else if ([type isEqualToString:@"color"]) {
+            UIView *dot = [[UIView alloc] initWithFrame:CGRectMake(0.0, 0.0, 28.0, 28.0)];
+            dot.tag = 4278;
+            dot.layer.cornerRadius = 14.0;
+            dot.layer.borderWidth = 2.0;
+            dot.layer.borderColor = UIColor.secondaryLabelColor.CGColor;
+            cell.accessoryView = dot;
+        } else if ([type isEqualToString:@"text"]) {
+            cell.textLabel.font = [UIFont systemFontOfSize:10.0];
+            cell.textLabel.textColor = UIColor.secondaryLabelColor;
+            cell.textLabel.numberOfLines = 0;
+            cell.selectionStyle = UITableViewCellSelectionStyleNone;
         } else {
+            cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+        }
+    }
+
+    cell.backgroundColor = YTKACESettingsCellBackground();
+
+    if ([type isEqualToString:@"toggle"]) {
+        cell.textLabel.text = item[@"title"];
+        cell.detailTextLabel.text = item[@"subtitle"];
+        UISwitch *toggle = (UISwitch *)cell.accessoryView;
+        toggle.onTintColor = YTKACEAccentColor();
+        id stored = YTKACEPreferenceObject(item[@"key"]);
+        toggle.on = [stored respondsToSelector:@selector(boolValue)] && [stored boolValue];
+        objc_setAssociatedObject(toggle, YTKACEItemAssociation, item, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    } else if ([type isEqualToString:@"segmented"]) {
+        if ([item[@"stacked"] boolValue]) {
+            UILabel *caption = [cell.contentView viewWithTag:8802];
+            caption.text = item[@"title"];
+            UISegmentedControl *control = [cell.contentView viewWithTag:8801];
+            [control removeAllSegments];
+            NSArray *titles = item[@"titles"];
+            for (NSUInteger i = 0; i < titles.count; i++) {
+                [control insertSegmentWithTitle:titles[i] atIndex:i animated:NO];
+            }
+            id selected = YTKACEPreferenceObject(item[@"key"]);
+            NSUInteger selectedIndex = [item[@"values"] indexOfObject:selected];
+            control.selectedSegmentIndex = selectedIndex == NSNotFound
+                ? [item[@"default"] unsignedIntegerValue]
+                : selectedIndex;
+            objc_setAssociatedObject(control, YTKACEItemAssociation, item, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            cell.textLabel.text = nil;
+            cell.detailTextLabel.text = nil;
+        } else {
+            cell.textLabel.text = item[@"title"];
+            cell.detailTextLabel.text = item[@"subtitle"];
+            UISegmentedControl *control = [[UISegmentedControl alloc] initWithItems:item[@"titles"]];
+            id selected = YTKACEPreferenceObject(item[@"key"]);
+            NSUInteger selectedIndex = [item[@"values"] indexOfObject:selected];
+            control.selectedSegmentIndex = selectedIndex == NSNotFound
+                ? [item[@"default"] unsignedIntegerValue]
+                : selectedIndex;
+            objc_setAssociatedObject(control, YTKACEItemAssociation, item, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            [control addTarget:self action:@selector(segmentChanged:) forControlEvents:UIControlEventValueChanged];
             CGFloat width = MAX(128.0, [item[@"titles"] count] * 68.0);
             control.frame = CGRectMake(0.0, 0.0, width, 30.0);
             cell.accessoryView = control;
+            cell.selectionStyle = UITableViewCellSelectionStyleNone;
         }
-        cell.selectionStyle = UITableViewCellSelectionStyleNone;
     } else if ([type isEqualToString:@"stepper"]) {
         double stored = [YTKACEPreferenceObject(item[@"key"]) doubleValue];
         double value = stored > 0.0 ? stored : [item[@"fallback"] doubleValue];
         cell.textLabel.text = YTKACEStepperText(item, value);
-        UIStepper *stepper = [UIStepper new];
+        cell.detailTextLabel.text = item[@"subtitle"];
+        UIStepper *stepper = (UIStepper *)cell.accessoryView;
         stepper.tintColor = YTKACEAccentColor();
         stepper.minimumValue = [item[@"minimum"] doubleValue];
         stepper.maximumValue = [item[@"maximum"] doubleValue];
         stepper.stepValue = [item[@"step"] doubleValue];
         stepper.value = value;
-        objc_setAssociatedObject(stepper,
-                                 YTKACEItemAssociation,
-                                 item,
-                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        objc_setAssociatedObject(stepper,
-                                 YTKACEValueLabelAssociation,
-                                 cell,
-                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        [stepper addTarget:self
-                    action:@selector(stepperChanged:)
-          forControlEvents:UIControlEventValueChanged];
-        cell.accessoryView = stepper;
-        cell.selectionStyle = UITableViewCellSelectionStyleNone;
+        objc_setAssociatedObject(stepper, YTKACEItemAssociation, item, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        objc_setAssociatedObject(stepper, YTKACEValueLabelAssociation, cell, OBJC_ASSOCIATION_ASSIGN);
     } else if ([type isEqualToString:@"slider"] && [item[@"stacked"] boolValue]) {
         double stored = [YTKACEPreferenceObject(item[@"key"]) doubleValue];
         double value = stored > 0.0 ? stored : [item[@"fallback"] doubleValue];
-
-        UILabel *caption = [UILabel new];
+        UILabel *caption = [cell.contentView viewWithTag:4272];
         caption.text = item[@"title"];
-        caption.font = [UIFont systemFontOfSize:16.0];
-        caption.textColor = UIColor.labelColor;
-
-        UILabel *readout = [UILabel new];
-        readout.font = [UIFont monospacedDigitSystemFontOfSize:15.0
-                                                        weight:UIFontWeightSemibold];
+        UILabel *readout = [cell.contentView viewWithTag:4273];
         readout.textColor = YTKACEAccentColor();
-        readout.textAlignment = NSTextAlignmentRight;
         readout.text = YTKACESliderValueText(item, value);
-        [readout setContentCompressionResistancePriority:UILayoutPriorityRequired
-                                                 forAxis:UILayoutConstraintAxisHorizontal];
-
-        UISlider *slider = [UISlider new];
+        UISlider *slider = [cell.contentView viewWithTag:4274];
         slider.minimumTrackTintColor = YTKACEAccentColor();
         slider.minimumValue = [item[@"minimum"] floatValue];
         slider.maximumValue = [item[@"maximum"] floatValue];
         slider.value = (float)value;
-        objc_setAssociatedObject(slider, YTKACEItemAssociation, item,
-                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        objc_setAssociatedObject(slider, YTKACEValueLabelAssociation, readout,
-                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        [slider addTarget:self
-                   action:@selector(sliderChanged:)
-         forControlEvents:UIControlEventValueChanged];
-
-        UIStackView *heading = [[UIStackView alloc] initWithArrangedSubviews:@[caption, readout]];
-        heading.axis = UILayoutConstraintAxisHorizontal;
-        heading.spacing = 8.0;
-
-        UIStackView *track = [[UIStackView alloc] initWithArrangedSubviews:@[
-            YTKACEStepControl(NO, slider, self, @selector(sliderStepped:)),
-            slider,
-            YTKACEStepControl(YES, slider, self, @selector(sliderStepped:))
-        ]];
-        track.axis = UILayoutConstraintAxisHorizontal;
-        track.alignment = UIStackViewAlignmentCenter;
-        track.spacing = 10.0;
-
-        UIStackView *container = [[UIStackView alloc] initWithArrangedSubviews:@[heading, track]];
-        container.tag = 4271;
-        container.axis = UILayoutConstraintAxisVertical;
-        container.spacing = 6.0;
-        container.translatesAutoresizingMaskIntoConstraints = NO;
-        [cell.contentView addSubview:container];
-
-        UILayoutGuide *guide = cell.contentView.layoutMarginsGuide;
-        [NSLayoutConstraint activateConstraints:@[
-            [container.leadingAnchor constraintEqualToAnchor:guide.leadingAnchor],
-            [container.trailingAnchor constraintEqualToAnchor:guide.trailingAnchor],
-            [container.topAnchor constraintEqualToAnchor:cell.contentView.topAnchor
-                                                constant:8.0],
-            [container.bottomAnchor constraintEqualToAnchor:cell.contentView.bottomAnchor
-                                                   constant:-8.0]
-        ]];
+        objc_setAssociatedObject(slider, YTKACEItemAssociation, item, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        objc_setAssociatedObject(slider, YTKACEValueLabelAssociation, readout, OBJC_ASSOCIATION_ASSIGN);
         cell.textLabel.text = nil;
-        cell.accessoryView = nil;
-        cell.selectionStyle = UITableViewCellSelectionStyleNone;
+        cell.detailTextLabel.text = nil;
     } else if ([type isEqualToString:@"slider"]) {
         double stored = [YTKACEPreferenceObject(item[@"key"]) doubleValue];
         double value = stored > 0.0 ? stored : [item[@"fallback"] doubleValue];
-        UIView *accessory = [[UIView alloc] initWithFrame:CGRectMake(0.0, 0.0, 158.0, 46.0)];
-        UISlider *slider = [[UISlider alloc] initWithFrame:CGRectMake(0.0, 0.0, 158.0, 30.0)];
+        cell.textLabel.text = item[@"title"];
+        cell.detailTextLabel.text = item[@"subtitle"];
+        UIView *accessory = cell.accessoryView;
+        UISlider *slider = [accessory viewWithTag:4275];
+        UILabel *valueLabel = [accessory viewWithTag:4276];
         slider.minimumTrackTintColor = YTKACEAccentColor();
         slider.minimumValue = [item[@"minimum"] floatValue];
         slider.maximumValue = [item[@"maximum"] floatValue];
         slider.value = (float)value;
-        UILabel *valueLabel = [[UILabel alloc] initWithFrame:CGRectMake(0.0, 28.0, 158.0, 14.0)];
-        valueLabel.font = [UIFont systemFontOfSize:10.0];
-        valueLabel.textColor = UIColor.tertiaryLabelColor;
-        valueLabel.textAlignment = NSTextAlignmentRight;
         valueLabel.text = YTKACESliderValueText(item, value);
         objc_setAssociatedObject(slider, YTKACEItemAssociation, item, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        objc_setAssociatedObject(slider, YTKACEValueLabelAssociation, valueLabel, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        [slider addTarget:self action:@selector(sliderChanged:) forControlEvents:UIControlEventValueChanged];
-        [accessory addSubview:slider];
-        [accessory addSubview:valueLabel];
-        cell.accessoryView = accessory;
-        cell.selectionStyle = UITableViewCellSelectionStyleNone;
+        objc_setAssociatedObject(slider, YTKACEValueLabelAssociation, valueLabel, OBJC_ASSOCIATION_ASSIGN);
     } else if ([type isEqualToString:@"picker"]) {
+        cell.textLabel.text = item[@"title"];
         NSString *summary = YTKACEPickerSummary(
             item[@"key"],
             item[@"titles"],
             item[@"values"],
             [item[@"default"] unsignedIntegerValue]
         );
-        if ([item[@"subtitle"] length] == 0) {
+        if (hasSubtitle) {
+            cell.detailTextLabel.text = item[@"subtitle"];
+            UILabel *value = (UILabel *)cell.accessoryView;
+            value.textColor = YTKACEAccentColor();
+            value.text = summary;
+            [value sizeToFit];
+        } else {
             cell.detailTextLabel.text = summary;
             cell.detailTextLabel.textColor = YTKACEAccentColor();
-        } else {
-            UILabel *value = [UILabel new];
-            value.text = summary;
-            value.font = [UIFont systemFontOfSize:15.0];
-            value.textColor = YTKACEAccentColor();
-            value.textAlignment = NSTextAlignmentRight;
-            [value sizeToFit];
-            cell.accessoryView = value;
+            cell.accessoryView = nil;
         }
         cell.accessoryType = UITableViewCellAccessoryNone;
     } else if ([type isEqualToString:@"color"]) {
+        cell.textLabel.text = item[@"title"];
+        cell.detailTextLabel.text = item[@"subtitle"];
         NSString *stored = YTKACEPreferenceObject(item[@"key"]);
-        UIColor *color = YTKACEColorFromHex(
-            [stored isKindOfClass:NSString.class] ? stored : item[@"fallback"]);
-        UIView *dot = [[UIView alloc] initWithFrame:CGRectMake(0.0, 0.0, 28.0, 28.0)];
+        UIColor *color = YTKACEColorFromHex([stored isKindOfClass:NSString.class] ? stored : item[@"fallback"]);
+        UIView *dot = cell.accessoryView;
         dot.backgroundColor = color;
-        dot.layer.cornerRadius = 14.0;
-        dot.layer.borderWidth = 2.0;
-        dot.layer.borderColor = UIColor.secondaryLabelColor.CGColor;
-        cell.accessoryView = dot;
     } else if ([type isEqualToString:@"text"]) {
-        cell.textLabel.font = [UIFont systemFontOfSize:10.0];
-        cell.textLabel.textColor = UIColor.secondaryLabelColor;
-        cell.textLabel.numberOfLines = 0;
-        cell.selectionStyle = UITableViewCellSelectionStyleNone;
+        cell.textLabel.text = item[@"title"];
     } else {
-        cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+        cell.textLabel.text = item[@"title"];
+        cell.detailTextLabel.text = item[@"subtitle"];
     }
     return cell;
 }
@@ -1035,10 +1080,17 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
 - (void)colorPickerViewController:(UIColorPickerViewController *)viewController
                    didSelectColor:(UIColor *)color
                      continuously:(BOOL)continuously {
-    (void)continuously;
+    (void)viewController;
     if (_colorKey.length == 0 || color == nil) return;
     YTKACESetPreferenceObject(_colorKey, YTKACEHexFromColor(color));
     if (_colorPath != nil) {
+        if (continuously) {
+            UITableViewCell *cell = [self.tableView cellForRowAtIndexPath:_colorPath];
+            if (cell && cell.accessoryView) {
+                cell.accessoryView.backgroundColor = color;
+                return;
+            }
+        }
         [self.tableView reloadRowsAtIndexPaths:@[_colorPath]
                               withRowAnimation:UITableViewRowAnimationNone];
     }

@@ -239,6 +239,42 @@ static void YTKACEApplyImage(id node, NSString *videoID, UIImage *image) {
     });
 }
 
+static NSString *YTKACEDeArrowDiskThumbDirectory(void) {
+    static NSString *dir;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        NSString *caches = [NSSearchPathForDirectoriesInDomains(
+            NSCachesDirectory, NSUserDomainMask, YES) firstObject];
+        dir = [caches stringByAppendingPathComponent:@"YTKACEDeArrowThumbs"];
+        [NSFileManager.defaultManager createDirectoryAtPath:dir
+                                withIntermediateDirectories:YES
+                                                 attributes:nil
+                                                      error:nil];
+    });
+    return dir;
+}
+
+static NSString *YTKACEDeArrowDiskThumbPath(NSString *videoID) {
+    return [YTKACEDeArrowDiskThumbDirectory() stringByAppendingPathComponent:
+        [NSString stringWithFormat:@"%@.jpg", videoID]];
+}
+
+static UIImage *YTKACEDeArrowLoadDiskThumb(NSString *videoID) {
+    if (videoID.length == 0) return nil;
+    NSString *path = YTKACEDeArrowDiskThumbPath(videoID);
+    if (![NSFileManager.defaultManager fileExistsAtPath:path]) return nil;
+    NSData *data = [NSData dataWithContentsOfFile:path];
+    return data.length != 0 ? [UIImage imageWithData:data] : nil;
+}
+
+static void YTKACEDeArrowSaveDiskThumb(NSString *videoID, NSData *data) {
+    if (videoID.length == 0 || data.length == 0) return;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        NSString *path = YTKACEDeArrowDiskThumbPath(videoID);
+        [data writeToFile:path atomically:YES];
+    });
+}
+
 static void YTKACEFetchThumbnail(NSString *videoID, double timestamp, id node) {
     if (!YTKACEReplacingThumbs()) return;
     os_unfair_lock_lock(&YTKACELock);
@@ -258,7 +294,7 @@ static void YTKACEFetchThumbnail(NSString *videoID, double timestamp, id node) {
         return;
     }
     NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:URL];
-    request.timeoutInterval = 20.0;
+    request.timeoutInterval = 5.0;
     __weak id weakNode = node;
     [[NSURLSession.sharedSession dataTaskWithRequest:request
         completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
@@ -269,11 +305,22 @@ static void YTKACEFetchThumbnail(NSString *videoID, double timestamp, id node) {
             ? (NSHTTPURLResponse *)response : nil;
         UIImage *decoded = (error == nil && http.statusCode == 200 && data.length != 0)
             ? [UIImage imageWithData:data] : nil;
-        if (decoded == nil) return;
-        os_unfair_lock_lock(&YTKACELock);
-        [YTKACEImageCache setObject:decoded forKey:videoID];
-        os_unfair_lock_unlock(&YTKACELock);
-        YTKACEApplyImage(weakNode, videoID, decoded);
+        if (decoded != nil) {
+            os_unfair_lock_lock(&YTKACELock);
+            [YTKACEImageCache setObject:decoded forKey:videoID];
+            os_unfair_lock_unlock(&YTKACELock);
+            YTKACEDeArrowSaveDiskThumb(videoID, data);
+            YTKACEApplyImage(weakNode, videoID, decoded);
+        } else {
+            // Offline fallback: check if we have a cached disk thumbnail
+            UIImage *diskThumb = YTKACEDeArrowLoadDiskThumb(videoID);
+            if (diskThumb != nil) {
+                os_unfair_lock_lock(&YTKACELock);
+                [YTKACEImageCache setObject:diskThumb forKey:videoID];
+                os_unfair_lock_unlock(&YTKACELock);
+                YTKACEApplyImage(weakNode, videoID, diskThumb);
+            }
+        }
     }] resume];
 }
 
@@ -375,7 +422,7 @@ static void YTKACEFetchBranding(NSString *videoID, id node) {
     NSURL *URL = [NSURL URLWithString:address];
     if (URL == nil) return;
     NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:URL];
-    request.timeoutInterval = 15.0;
+    request.timeoutInterval = 5.0;
     [request setValue:@"application/json" forHTTPHeaderField:@"Accept"];
     __weak id weakNode = node;
     [[NSURLSession.sharedSession dataTaskWithRequest:request
@@ -386,6 +433,8 @@ static void YTKACEFetchBranding(NSString *videoID, id node) {
             os_unfair_lock_lock(&YTKACELock);
             [YTKACEInFlight removeObject:videoID];
             if (YTKACEActiveRequests > 0) YTKACEActiveRequests--;
+            [YTKACEPendingCells removeObjectForKey:videoID];
+            [YTKACEPendingNodes removeObjectForKey:videoID];
             os_unfair_lock_unlock(&YTKACELock);
             YTKACEPumpQueue();
             return;
@@ -490,6 +539,16 @@ static void YTKACEConsiderVideo(id node, NSString *videoID) {
     NSDictionary *known = YTKACEFreshEntryLocked(videoID);
     os_unfair_lock_unlock(&YTKACELock);
 
+    if (ready == nil && replacing) {
+        UIImage *diskThumb = YTKACEDeArrowLoadDiskThumb(videoID);
+        if (diskThumb != nil) {
+            os_unfair_lock_lock(&YTKACELock);
+            [YTKACEImageCache setObject:diskThumb forKey:videoID];
+            os_unfair_lock_unlock(&YTKACELock);
+            ready = diskThumb;
+        }
+    }
+
     if (ready != nil) {
         YTKACEApplyImage(node, videoID, ready);
         return;
@@ -556,6 +615,13 @@ void YTKACEDeArrowClearCache(void) {
     [YTKACEPendingCells removeAllObjects];
     os_unfair_lock_unlock(&YTKACELock);
     [NSUserDefaults.standardUserDefaults removeObjectForKey:YTKACEBrandingStoreKey];
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        NSString *dir = YTKACEDeArrowDiskThumbDirectory();
+        NSArray *files = [NSFileManager.defaultManager contentsOfDirectoryAtPath:dir error:nil];
+        for (NSString *file in files) {
+            [NSFileManager.defaultManager removeItemAtPath:[dir stringByAppendingPathComponent:file] error:nil];
+        }
+    });
 }
 
 void YTKACEInstallDeArrow(void) {

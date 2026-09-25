@@ -89,27 +89,26 @@ static BOOL YTKACEDeliverRate(id target, NSString *name, double rate) {
     NSMethodSignature *signature = [target methodSignatureForSelector:selector];
     if (signature == nil || signature.numberOfArguments != 3) return NO;
 
+    const char type = [signature getArgumentTypeAtIndex:2][0];
+    if (type == 'f') {
+        ((void (*)(id, SEL, float))objc_msgSend)(target, selector, (float)rate);
+        return YES;
+    }
+    if (type == 'd') {
+        ((void (*)(id, SEL, double))objc_msgSend)(target, selector, rate);
+        return YES;
+    }
+    if (type == '@') {
+        ((void (*)(id, SEL, id))objc_msgSend)(target, selector, @(rate));
+        return YES;
+    }
+
     NSInvocation *call = [NSInvocation invocationWithMethodSignature:signature];
     call.target = target;
     call.selector = selector;
 
     const long long scaled = llround(rate * 100.0);
-    switch ([signature getArgumentTypeAtIndex:2][0]) {
-        case 'd': {
-            double value = rate;
-            [call setArgument:&value atIndex:2];
-            break;
-        }
-        case 'f': {
-            float value = (float)rate;
-            [call setArgument:&value atIndex:2];
-            break;
-        }
-        case '@': {
-            id value = @(rate);
-            [call setArgument:&value atIndex:2];
-            break;
-        }
+    switch (type) {
         case 'c': case 'C': {
             char value = (char)scaled;
             [call setArgument:&value atIndex:2];
@@ -171,6 +170,7 @@ static UIImage *YTKACESpeedButtonImage(BOOL plus) {
 @property(nonatomic, weak) UIView *overlay;
 @property(nonatomic, weak) UIButton *valueButton;
 @property(nonatomic, weak) id rateSource;
+@property(nonatomic, weak) AVPlayer *cachedPlayer;
 @property(nonatomic, copy) NSString *primedVideo;
 @property(nonatomic, assign) double observedRate;
 @property(nonatomic, readonly) double currentRate;
@@ -353,11 +353,14 @@ static UIImage *YTKACESpeedButtonImage(BOOL plus) {
 }
 
 - (AVPlayer *)activePlayer {
+    if (self.cachedPlayer != nil) return self.cachedPlayer;
     UIView *root = self.overlay;
     while (root.superview != nil) {
         root = root.superview;
     }
-    return [self activePlayerInLayer:root.layer];
+    AVPlayer *player = [self activePlayerInLayer:root.layer];
+    self.cachedPlayer = player;
+    return player;
 }
 
 - (BOOL)applyRate:(double)rate toObject:(id)object depth:(NSUInteger)depth {
@@ -391,6 +394,10 @@ static UIImage *YTKACESpeedButtonImage(BOOL plus) {
     rate = MIN(5.0, MAX(0.25, rate));
     if (![self applyRate:rate toObject:self.eventsDelegate depth:0]) {
         [self applyRate:rate toObject:self.rateSource depth:0];
+    }
+    AVPlayer *avPlayer = self.activePlayer;
+    if (avPlayer != nil && avPlayer.rate > 0.0f) {
+        avPlayer.rate = (float)rate;
     }
     [NSUserDefaults.standardUserDefaults setFloat:(float)rate
                                            forKey:YTKACELastRateKey];

@@ -11,6 +11,10 @@ void PlaybackWatchdog::setLive(bool live) { live_ = live; }
 
 bool PlaybackWatchdog::live() const { return live_; }
 
+void PlaybackWatchdog::setPlaybackRate(double rate) { rate_ = rate > 0.0 ? rate : 1.0; }
+
+double PlaybackWatchdog::playbackRate() const { return rate_; }
+
 WatchdogState PlaybackWatchdog::state() const { return state_; }
 
 void PlaybackWatchdog::reset(WatchdogState state) {
@@ -103,9 +107,10 @@ WatchdogOutcome PlaybackWatchdog::handle(WatchdogEvent event, double now,
             return outcome;
 
         case WatchdogEvent::ProgressObserved: {
+            const double effectiveEpsilon = rate_ > 0.0 ? config_.progressEpsilon * std::min(1.0, rate_) : config_.progressEpsilon;
             const bool advanced =
                 lastPosition_ < 0.0 ||
-                (mediaPosition - lastPosition_) >= config_.progressEpsilon;
+                (mediaPosition - lastPosition_) >= effectiveEpsilon;
             if (mediaPosition >= 0.0) lastPosition_ = mediaPosition;
             if (!advanced) return outcome;
             if (state_ == WatchdogState::Suspect) {
@@ -132,9 +137,10 @@ WatchdogOutcome PlaybackWatchdog::handle(WatchdogEvent event, double now,
                 return outcome;
             }
             if (state_ == WatchdogState::Suspect) {
+                const double effectiveEpsilon = rate_ > 0.0 ? config_.progressEpsilon * std::min(1.0, rate_) : config_.progressEpsilon;
                 const bool progressed =
                     positionAtSuspicion_ >= 0.0 && lastPosition_ >= 0.0 &&
-                    (lastPosition_ - positionAtSuspicion_) >= config_.progressEpsilon;
+                    (lastPosition_ - positionAtSuspicion_) >= effectiveEpsilon;
                 if (progressed) {
                     reset(WatchdogState::Watching);
                     outcome.cancelTimers = true;

@@ -89,36 +89,44 @@ static NSString *YTKACEParseTranscript(NSData *data, BOOL timestamps) {
                                                            error:NULL];
     if (![root isKindOfClass:NSDictionary.class]) return nil;
     NSArray *events = root[@"events"];
-    if (![events isKindOfClass:NSArray.class]) return nil;
+    if (![events isKindOfClass:NSArray.class] || events.count == 0) return nil;
 
-    NSMutableArray<NSString *> *lines = [NSMutableArray array];
+    NSMutableString *result = [NSMutableString stringWithCapacity:data.length / 2];
+    NSMutableString *lineBuf = [NSMutableString stringWithCapacity:128];
+    BOOL first = YES;
+
     for (NSDictionary *event in events) {
         if (![event isKindOfClass:NSDictionary.class]) continue;
         NSArray *segments = event[@"segs"];
         if (![segments isKindOfClass:NSArray.class]) continue;
-        NSMutableString *line = [NSMutableString string];
+
+        [lineBuf setString:@""];
         for (NSDictionary *segment in segments) {
             if (![segment isKindOfClass:NSDictionary.class]) continue;
             NSString *text = segment[@"utf8"];
-            if ([text isKindOfClass:NSString.class]) [line appendString:text];
+            if ([text isKindOfClass:NSString.class]) [lineBuf appendString:text];
         }
-        NSString *trimmed = [line stringByTrimmingCharactersInSet:
+
+        NSString *trimmed = [lineBuf stringByTrimmingCharactersInSet:
             NSCharacterSet.whitespaceAndNewlineCharacterSet];
         if (trimmed.length == 0) continue;
+
+        if (!first) {
+            [result appendString:timestamps ? @"\n" : @" "];
+        }
+        first = NO;
+
         if (timestamps) {
             NSNumber *start = event[@"tStartMs"];
             const double seconds = [start isKindOfClass:NSNumber.class]
                 ? start.doubleValue / 1000.0 : 0.0;
-            [lines addObject:[NSString stringWithFormat:@"[%@] %@",
-                              YTKACETimestamp(seconds), trimmed]];
+            [result appendFormat:@"[%@] %@", YTKACETimestamp(seconds), trimmed];
         } else {
-            [lines addObject:trimmed];
+            [result appendString:trimmed];
         }
     }
-    if (lines.count == 0) return nil;
-    return [lines componentsJoinedByString:timestamps ? @"\n" : @" "];
+    return result.length != 0 ? result : nil;
 }
-
 
 static id YTKACEProbe(id object, NSArray<NSString *> *names) {
     for (NSString *name in names) {
@@ -148,20 +156,26 @@ NSArray<NSDictionary *> *YTKACEParseCaptionCues(NSData *data) {
     if (![root isKindOfClass:NSDictionary.class]) return nil;
     NSArray *events = root[@"events"];
     if (![events isKindOfClass:NSArray.class]) return nil;
-    NSMutableArray<NSDictionary *> *cues = [NSMutableArray array];
+
+    NSMutableArray<NSDictionary *> *cues = [NSMutableArray arrayWithCapacity:events.count];
+    NSMutableString *lineBuf = [NSMutableString stringWithCapacity:128];
+
     for (NSDictionary *event in events) {
         if (![event isKindOfClass:NSDictionary.class]) continue;
         NSArray *segments = event[@"segs"];
         if (![segments isKindOfClass:NSArray.class]) continue;
-        NSMutableString *line = [NSMutableString string];
+
+        [lineBuf setString:@""];
         for (NSDictionary *segment in segments) {
             if (![segment isKindOfClass:NSDictionary.class]) continue;
             NSString *piece = segment[@"utf8"];
-            if ([piece isKindOfClass:NSString.class]) [line appendString:piece];
+            if ([piece isKindOfClass:NSString.class]) [lineBuf appendString:piece];
         }
-        NSString *trimmed = [line stringByTrimmingCharactersInSet:
+
+        NSString *trimmed = [lineBuf stringByTrimmingCharactersInSet:
             NSCharacterSet.whitespaceAndNewlineCharacterSet];
         if (trimmed.length == 0) continue;
+
         NSNumber *startMs = event[@"tStartMs"];
         NSNumber *durationMs = event[@"dDurationMs"];
         if (![startMs isKindOfClass:NSNumber.class]) continue;
@@ -170,7 +184,7 @@ NSArray<NSDictionary *> *YTKACEParseCaptionCues(NSData *data) {
             ? durationMs.doubleValue / 1000.0 : 2.0;
         [cues addObject:@{ @"start": @(start),
                            @"end": @(start + MAX(duration, 0.4)),
-                           @"text": trimmed }];
+                           @"text": [trimmed copy] }];
     }
     return cues.count != 0 ? cues : nil;
 }

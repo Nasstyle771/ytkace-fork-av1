@@ -545,10 +545,13 @@ static NSData *YTKACESABRClientInfo(void) {
 @implementation YTKACESABRHeader
 @end
 
+static const NSUInteger kYTKACESABRChunkBufferSize = 128 * 1024; // 128KB optimal chunk buffer
+
 @interface YTKACESABRTrack : NSObject
 @property(nonatomic, strong) YTKACEStreamOption *option;
 @property(nonatomic, strong) NSURL *URL;
 @property(nonatomic, strong) NSFileHandle *handle;
+@property(nonatomic, strong) NSMutableData *writeBuffer;
 @property(nonatomic, strong) NSMutableSet<NSString *> *segments;
 @property(nonatomic, assign) BOOL initialized;
 @property(nonatomic, assign) BOOL initializationWritten;
@@ -658,6 +661,7 @@ static NSData *YTKACESABRClientInfo(void) {
         [NSString stringWithFormat:@"%@.%@", name, extension]];
     [NSFileManager.defaultManager createFileAtPath:track.URL.path contents:nil attributes:nil];
     track.handle = [NSFileHandle fileHandleForWritingToURL:track.URL error:error];
+    track.writeBuffer = [NSMutableData dataWithCapacity:kYTKACESABRChunkBufferSize];
     return track;
 }
 
@@ -949,10 +953,11 @@ NSUInteger YTKACEPurgeDownloadScratch(BOOL includeActive) {
     configuration.allowsExpensiveNetworkAccess = YES;
     configuration.allowsConstrainedNetworkAccess = YES;
     configuration.networkServiceType = (NSURLRequestNetworkServiceType)6;
-    configuration.HTTPMaximumConnectionsPerHost = 8;
+    configuration.HTTPMaximumConnectionsPerHost = 16;
+    configuration.HTTPShouldUsePipelining = YES;
     NSOperationQueue *queue = [NSOperationQueue new];
-    queue.maxConcurrentOperationCount = 4;
-    queue.qualityOfService = NSQualityOfServiceUtility;
+    queue.maxConcurrentOperationCount = 8;
+    queue.qualityOfService = NSQualityOfServiceUserInitiated;
     self.session = [NSURLSession sessionWithConfiguration:configuration
         delegate:self delegateQueue:queue];
     NSString *serverHost = [NSURL URLWithString:self.serverURL].host ?: @"unknown";
@@ -1133,7 +1138,7 @@ NSUInteger YTKACEPurgeDownloadScratch(BOOL includeActive) {
  didCompleteWithError:(NSError *)error {
     (void)session;
     if (self.finished || task.taskDescription.integerValue != self.activeRequestNumber) return;
-    NSData *data = [self.activeResponseData copy];
+    NSData *data = self.activeResponseData;
     NSHTTPURLResponse *http = self.activeResponse ?: (NSHTTPURLResponse *)task.response;
     NSTimeInterval elapsed = MAX(NSDate.date.timeIntervalSinceReferenceDate -
         self.activeRequestStart, 0.001);
@@ -1239,7 +1244,38 @@ NSUInteger YTKACEPurgeDownloadScratch(BOOL includeActive) {
     const uint8_t *bytes = (const uint8_t *)data.bytes;
     YTKACESABRHeader *header = self.headers[@(bytes[0])];
     if (header == nil || data.length == 1) return;
-    [header.data appendData:[data subdataWithRange:NSMakeRange(1, data.length - 1)]];
+    // Memory-efficient data append directly without autoreleased NSData allocations
+    [header.data appendBytes:bytes + 1 length:data.length - 1];
+}
+
+- (void)flushTrackBuffer:(YTKACESABRTrack *)track sync:(BOOL)sync {
+    if (track == nil) return;
+    if (track.writeBuffer.length > 0) {
+        if (@available(iOS 13.0, *)) {
+            [track.handle writeData:track.writeBuffer error:nil];
+        } else {
+            [track.handle writeData:track.writeBuffer];
+        }
+        track.writeBuffer.length = 0;
+    }
+    if (sync) {
+        if (@available(iOS 13.0, *)) {
+            [track.handle synchronizeAndReturnError:nil];
+        } else {
+            [track.handle synchronizeFile];
+        }
+    }
+}
+
+- (void)writeTrackData:(NSData *)data toTrack:(YTKACESABRTrack *)track flushImmediately:(BOOL)flushImmediately {
+    if (track == nil || data.length == 0) return;
+    if (track.writeBuffer == nil) {
+        track.writeBuffer = [NSMutableData dataWithCapacity:kYTKACESABRChunkBufferSize];
+    }
+    [track.writeBuffer appendData:data];
+    if (flushImmediately || track.writeBuffer.length >= kYTKACESABRChunkBufferSize) {
+        [self flushTrackBuffer:track sync:flushImmediately];
+    }
 }
 
 - (void)finishHeader:(NSData *)data {
@@ -1268,12 +1304,12 @@ NSUInteger YTKACEPurgeDownloadScratch(BOOL includeActive) {
     [track.segments addObject:segmentKey];
     if (header.initialization) {
         if (!track.initializationWritten) {
-            [track.handle writeData:header.data];
+            [self writeTrackData:header.data toTrack:track flushImmediately:YES];
             track.initializationWritten = YES;
         }
         return;
     }
-    [track.handle writeData:header.data];
+    [self writeTrackData:header.data toTrack:track flushImmediately:NO];
     track.downloadedBytes += (int64_t)header.data.length;
     track.lastSequence = MAX(track.lastSequence, header.sequence);
     track.downloadedDuration += MAX(header.duration, 0);
@@ -1595,6 +1631,8 @@ NSUInteger YTKACEPurgeDownloadScratch(BOOL includeActive) {
         return;
     }
     self.finished = YES;
+    [self flushTrackBuffer:self.video sync:YES];
+    [self flushTrackBuffer:self.audio sync:YES];
     [self.video.handle closeFile];
     [self.audio.handle closeFile];
     [self.session invalidateAndCancel];

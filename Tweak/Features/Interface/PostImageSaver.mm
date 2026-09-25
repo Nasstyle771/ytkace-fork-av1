@@ -96,7 +96,7 @@ static NSURL *YTKACEOriginalImageURL(NSURL *url) {
         return;
     }
 
-    SEL urlGetter = NSSelectorFromString(@"URL");
+    static const SEL urlGetter = @selector(URL);
     NSURL *url = [node respondsToSelector:urlGetter]
         ? ((id (*)(id, SEL))objc_msgSend)(node, urlGetter)
         : nil;
@@ -127,14 +127,18 @@ static NSURL *YTKACEOriginalImageURL(NSURL *url) {
 @end
 
 static UIImage *YTKACEPostSaveIcon(void) {
-    if (@available(iOS 13.0, *)) {
-        UIImageSymbolConfiguration *configuration =
-            [UIImageSymbolConfiguration configurationWithPointSize:18.0
-                                                           weight:UIImageSymbolWeightSemibold];
-        return [UIImage systemImageNamed:@"square.and.arrow.down"
-                       withConfiguration:configuration];
-    }
-    return nil;
+    static UIImage *s_saveIcon = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        if (@available(iOS 13.0, *)) {
+            UIImageSymbolConfiguration *configuration =
+                [UIImageSymbolConfiguration configurationWithPointSize:18.0
+                                                               weight:UIImageSymbolWeightSemibold];
+            s_saveIcon = [UIImage systemImageNamed:@"square.and.arrow.down"
+                                 withConfiguration:configuration];
+        }
+    });
+    return s_saveIcon;
 }
 
 static void YTKACEAttachSaveButton(UIView *container) {
@@ -189,16 +193,19 @@ static void YTKACEZoomNodeDidEnterVisibleState(id receiver, SEL selector) {
     if (!YTKACEFeatureEnabled(YTKACEPostImageSaveKey)) return;
 
     dispatch_async(dispatch_get_main_queue(), ^{
-        SEL viewGetter = NSSelectorFromString(@"view");
+        static const SEL viewGetter = @selector(view);
         if (![receiver respondsToSelector:viewGetter]) return;
         UIView *view = ((id (*)(id, SEL))objc_msgSend)(receiver, viewGetter);
         if (view.window == nil) return;
         UIViewController *owner = YTKACEOwningController(view);
         if (owner.view == nil) return;
 
-        Class viewerClass =
-            NSClassFromString(@"YTInterstitialElementsViewControllerImpl");
-        if (viewerClass == Nil || ![owner isKindOfClass:viewerClass]) return;
+        static Class s_viewerClass = Nil;
+        static dispatch_once_t onceToken;
+        dispatch_once(&onceToken, ^{
+            s_viewerClass = NSClassFromString(@"YTInterstitialElementsViewControllerImpl");
+        });
+        if (s_viewerClass == Nil || ![owner isKindOfClass:s_viewerClass]) return;
         YTKACECurrentZoomNode = receiver;
         YTKACEAttachSaveButton(owner.view);
     });

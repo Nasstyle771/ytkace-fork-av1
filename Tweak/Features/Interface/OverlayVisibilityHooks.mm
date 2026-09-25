@@ -45,7 +45,26 @@ static BOOL YTKACEOverlayPreference(NSString *key) {
     return YTKACEFeatureEnabled(key);
 }
 
+static inline BOOL YTKACEStringContainsAny(NSString *str, NSArray<NSString *> *needles) {
+    if (str.length == 0) return NO;
+    for (NSString *needle in needles) {
+        if ([str rangeOfString:needle options:NSCaseInsensitiveSearch].location != NSNotFound) {
+            return YES;
+        }
+    }
+    return NO;
+}
+
+static inline BOOL YTKACEViewMatchesAny(UIView *view, NSArray<NSString *> *needles) {
+    if (view == nil) return NO;
+    if (YTKACEStringContainsAny(view.accessibilityIdentifier, needles)) return YES;
+    if (YTKACEStringContainsAny(view.accessibilityLabel, needles)) return YES;
+    if (YTKACEStringContainsAny(NSStringFromClass(view.class), needles)) return YES;
+    return NO;
+}
+
 static NSString *YTKACEOverlayToken(UIView *view) {
+    if (view == nil) return @"";
     return [[NSString stringWithFormat:@"%@ %@ %@",
              NSStringFromClass(view.class),
              view.accessibilityIdentifier ?: @"",
@@ -54,8 +73,9 @@ static NSString *YTKACEOverlayToken(UIView *view) {
 
 static BOOL YTKACEOverlayTokenMatches(NSString *token,
                                       NSArray<NSString *> *needles) {
+    if (token.length == 0) return NO;
     for (NSString *needle in needles) {
-        if ([token containsString:needle]) {
+        if ([token rangeOfString:needle options:NSCaseInsensitiveSearch].location != NSNotFound) {
             return YES;
         }
     }
@@ -676,43 +696,62 @@ static void YTKACEApplyOverlayTree(UIView *view) {
     }
 }
 
+typedef struct {
+    SEL selector;
+    __unsafe_unretained NSString *prefKey;
+    BOOL isPrevNext;
+} YTKACEOverlaySelectorEntry;
+
 static void YTKACEApplyOverlaySelectors(id overlay) {
-    NSDictionary<NSString *, NSString *> *selectors = @{
-        @"autoplaySwitch": @"YTKACE.Preference.Overlay.AutoplayHidden",
-        @"autoplayButton": @"YTKACE.Preference.Overlay.AutoplayHidden",
-        @"captionsButton": @"YTKACE.Preference.Overlay.CaptionsButtonHidden",
-        @"closedCaptionsButton": @"YTKACE.Preference.Overlay.CaptionsButtonHidden",
-        @"castButton": @"YTKACE.Preference.Overlay.CastHidden",
-        @"playbackRouteButton": @"YTKACE.Preference.Overlay.CastHidden",
-        @"closedCaptionsOrSubtitlesButton": @"YTKACE.Preference.Overlay.CaptionsButtonHidden",
-        @"infoCardButton": @"YTKACE.Preference.Overlay.InfoCardsHidden",
-        @"watermarkView": @"YTKACE.Preference.Overlay.WatermarkHidden",
-        @"endscreenView": @"YTKACE.Preference.Overlay.EndScreenHidden",
-        @"playPauseButton": @"YTKACE.Preference.Overlay.PlayPauseHidden",
-        @"previousButton": @"YTKACE.Preference.Overlay.PreviousNextHidden",
-        @"nextButton": @"YTKACE.Preference.Overlay.PreviousNextHidden",
-        @"previousButtonView": @"YTKACE.Preference.Overlay.PreviousNextHidden",
-        @"nextButtonView": @"YTKACE.Preference.Overlay.PreviousNextHidden",
-        @"minimizedPanelPreviousButton": @"YTKACE.Preference.Overlay.PreviousNextHidden",
-        @"minimizedPanelNextButton": @"YTKACE.Preference.Overlay.PreviousNextHidden",
-        @"replayNextButton": @"YTKACE.Preference.Overlay.PreviousNextHidden",
-        @"overflowButton": @"YTKACE.Preference.Overlay.MoreButtonHidden",
-        @"settingsButton": @"YTKACE.Preference.Overlay.MoreButtonHidden"
+    if (overlay == nil) return;
+    static YTKACEOverlaySelectorEntry entries[] = {
+        {NULL, @"YTKACE.Preference.Overlay.AutoplayHidden", NO},
+        {NULL, @"YTKACE.Preference.Overlay.AutoplayHidden", NO},
+        {NULL, @"YTKACE.Preference.Overlay.CaptionsButtonHidden", NO},
+        {NULL, @"YTKACE.Preference.Overlay.CaptionsButtonHidden", NO},
+        {NULL, @"YTKACE.Preference.Overlay.CastHidden", NO},
+        {NULL, @"YTKACE.Preference.Overlay.CastHidden", NO},
+        {NULL, @"YTKACE.Preference.Overlay.CaptionsButtonHidden", NO},
+        {NULL, @"YTKACE.Preference.Overlay.InfoCardsHidden", NO},
+        {NULL, @"YTKACE.Preference.Overlay.WatermarkHidden", NO},
+        {NULL, @"YTKACE.Preference.Overlay.EndScreenHidden", NO},
+        {NULL, @"YTKACE.Preference.Overlay.PlayPauseHidden", NO},
+        {NULL, @"YTKACE.Preference.Overlay.PreviousNextHidden", YES},
+        {NULL, @"YTKACE.Preference.Overlay.PreviousNextHidden", YES},
+        {NULL, @"YTKACE.Preference.Overlay.PreviousNextHidden", YES},
+        {NULL, @"YTKACE.Preference.Overlay.PreviousNextHidden", YES},
+        {NULL, @"YTKACE.Preference.Overlay.PreviousNextHidden", YES},
+        {NULL, @"YTKACE.Preference.Overlay.PreviousNextHidden", YES},
+        {NULL, @"YTKACE.Preference.Overlay.PreviousNextHidden", YES},
+        {NULL, @"YTKACE.Preference.Overlay.MoreButtonHidden", NO},
+        {NULL, @"YTKACE.Preference.Overlay.MoreButtonHidden", NO}
     };
-    for (NSString *name in selectors) {
-        SEL selector = NSSelectorFromString(name);
-        if (![overlay respondsToSelector:selector]) {
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        const char *names[] = {
+            "autoplaySwitch", "autoplayButton", "captionsButton", "closedCaptionsButton",
+            "castButton", "playbackRouteButton", "closedCaptionsOrSubtitlesButton",
+            "infoCardButton", "watermarkView", "endscreenView", "playPauseButton",
+            "previousButton", "nextButton", "previousButtonView", "nextButtonView",
+            "minimizedPanelPreviousButton", "minimizedPanelNextButton", "replayNextButton",
+            "overflowButton", "settingsButton"
+        };
+        for (size_t i = 0; i < sizeof(names)/sizeof(names[0]); i++) {
+            entries[i].selector = sel_registerName(names[i]);
+        }
+    });
+
+    BOOL prevNextDisabled = YTKACEOverlayPreference(@"YTKACE.Preference.Overlay.PreviousNextDisabled");
+    for (size_t i = 0; i < sizeof(entries)/sizeof(entries[0]); i++) {
+        SEL selector = entries[i].selector;
+        if (selector == NULL || ![overlay respondsToSelector:selector]) {
             continue;
         }
         id value = ((id (*)(id, SEL))objc_msgSend)(overlay, selector);
         if ([value isKindOfClass:UIView.class]) {
-            YTKACESetOverlayHidden(value,
-                                   YTKACEFeatureEnabled(selectors[name]));
-            if ([name.lowercaseString containsString:@"previous"] ||
-                [name.lowercaseString containsString:@"next"]) {
-                BOOL disabled = YTKACEOverlayPreference(
-                    @"YTKACE.Preference.Overlay.PreviousNextDisabled");
-                YTKACESetControlTreeEnabled(value, !disabled);
+            YTKACESetOverlayHidden(value, YTKACEFeatureEnabled(entries[i].prefKey));
+            if (entries[i].isPrevNext) {
+                YTKACESetControlTreeEnabled(value, !prevNextDisabled);
             }
         }
     }
@@ -720,6 +759,7 @@ static void YTKACEApplyOverlaySelectors(id overlay) {
 
 static void YTKACESweepProductViews(UIView *root, BOOL hide) {
     if (root == nil) return;
+    if (!hide && YTKACEProductHiddenCount == 0) return;
     NSMutableArray<UIView *> *stack = [NSMutableArray arrayWithObject:root];
     while (stack.count != 0) {
         UIView *view = stack.lastObject;
@@ -766,12 +806,18 @@ BOOL YTKACEProductIdentifierMatches(NSString *identifier) {
 }
 
 BOOL YTKACEViewIsInsidePlayerOverlay(UIView *view) {
+    static Class overlayClass;
+    static Class controlsClass;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        overlayClass = NSClassFromString(@"YTMainAppVideoPlayerOverlayView");
+        controlsClass = NSClassFromString(@"YTMainAppControlsOverlayView");
+    });
     NSUInteger depth = 0;
     for (UIView *node = view; node != nil && depth < 12;
          node = node.superview, depth++) {
-        NSString *className = NSStringFromClass(node.class);
-        if ([className isEqualToString:@"YTMainAppVideoPlayerOverlayView"] ||
-            [className isEqualToString:@"YTMainAppControlsOverlayView"]) {
+        if ((overlayClass != Nil && [node isKindOfClass:overlayClass]) ||
+            (controlsClass != Nil && [node isKindOfClass:controlsClass])) {
             return YES;
         }
     }

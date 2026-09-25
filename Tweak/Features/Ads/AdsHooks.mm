@@ -5,6 +5,7 @@
 #import <UIKit/UIKit.h>
 #import <objc/message.h>
 #import <objc/runtime.h>
+#import <os/lock.h>
 
 static IMP OriginalShouldBlockUpgradeDialog;
 static IMP OriginalAdShieldSignals;
@@ -261,45 +262,73 @@ static BOOL YTKACEObjectBool(id object, NSString *selectorName) {
 static BOOL YTKACEReelObjectLooksLikeAd(id object, NSUInteger depth) {
     if (object == nil || depth > 3) return NO;
 
-    NSString *className = NSStringFromClass([object class]).lowercaseString;
-    if ([className containsString:@"nonvideoad"] ||
-        [className containsString:@"reelad"] ||
-        [className containsString:@"adselection"] ||
-        [className containsString:@"miniappad"]) {
-        return YES;
+    Class cls = object_getClass(object);
+    if (cls != Nil) {
+        const char *cName = class_getName(cls);
+        if (cName != NULL &&
+            (strcasestr(cName, "nonvideoad") ||
+             strcasestr(cName, "reelad") ||
+             strcasestr(cName, "adselection") ||
+             strcasestr(cName, "miniappad"))) {
+            return YES;
+        }
     }
 
-    for (NSString *selectorName in @[
-        @"isAd", @"isAdVideo", @"isVideoAd", @"hasAdLoggingData"
-    ]) {
-        if (YTKACEObjectBool(object, selectorName)) return YES;
+    static SEL s_reelBoolSels[4];
+    static dispatch_once_t onceReelBools;
+    dispatch_once(&onceReelBools, ^{
+        s_reelBoolSels[0] = sel_registerName("isAd");
+        s_reelBoolSels[1] = sel_registerName("isAdVideo");
+        s_reelBoolSels[2] = sel_registerName("isVideoAd");
+        s_reelBoolSels[3] = sel_registerName("hasAdLoggingData");
+    });
+    for (int i = 0; i < 4; i++) {
+        if ([object respondsToSelector:s_reelBoolSels[i]] &&
+            ((BOOL (*)(id, SEL))objc_msgSend)(object, s_reelBoolSels[i])) {
+            return YES;
+        }
     }
 
-    SEL videoTypeSelector = NSSelectorFromString(@"videoType");
-    if ([object respondsToSelector:videoTypeSelector]) {
-        NSInteger videoType = ((NSInteger (*)(id, SEL))objc_msgSend)(
-            object,
-            videoTypeSelector
-        );
+    static SEL s_videoTypeSel;
+    static dispatch_once_t onceVideoType;
+    dispatch_once(&onceVideoType, ^{
+        s_videoTypeSel = sel_registerName("videoType");
+    });
+    if ([object respondsToSelector:s_videoTypeSel]) {
+        NSInteger videoType = ((NSInteger (*)(id, SEL))objc_msgSend)(object, s_videoTypeSel);
         if (videoType == 3) return YES;
     }
 
-    for (NSString *selectorName in @[
-        @"adLoggingData",
-        @"adSlotRenderer",
-        @"reelNonVideoAdRenderer",
-        @"nonVideoAdRenderer",
-        @"sequenceItemAdSelectionRenderer"
-    ]) {
-        if (YTKACEObjectValue(object, selectorName) != nil) return YES;
+    static SEL s_reelObjSels[5];
+    static dispatch_once_t onceReelObjs;
+    dispatch_once(&onceReelObjs, ^{
+        s_reelObjSels[0] = sel_registerName("adLoggingData");
+        s_reelObjSels[1] = sel_registerName("adSlotRenderer");
+        s_reelObjSels[2] = sel_registerName("reelNonVideoAdRenderer");
+        s_reelObjSels[3] = sel_registerName("nonVideoAdRenderer");
+        s_reelObjSels[4] = sel_registerName("sequenceItemAdSelectionRenderer");
+    });
+    for (int i = 0; i < 5; i++) {
+        if ([object respondsToSelector:s_reelObjSels[i]] &&
+            ((id (*)(id, SEL))objc_msgSend)(object, s_reelObjSels[i]) != nil) {
+            return YES;
+        }
     }
 
-    for (NSString *selectorName in @[
-        @"reelModel", @"command", @"watchModel", @"parentWatchModel"
-    ]) {
-        id child = YTKACEObjectValue(object, selectorName);
-        if (child != object && YTKACEReelObjectLooksLikeAd(child, depth + 1)) {
-            return YES;
+    static SEL s_reelChildSels[4];
+    static dispatch_once_t onceReelChildren;
+    dispatch_once(&onceReelChildren, ^{
+        s_reelChildSels[0] = sel_registerName("reelModel");
+        s_reelChildSels[1] = sel_registerName("command");
+        s_reelChildSels[2] = sel_registerName("watchModel");
+        s_reelChildSels[3] = sel_registerName("parentWatchModel");
+    });
+    for (int i = 0; i < 4; i++) {
+        if ([object respondsToSelector:s_reelChildSels[i]]) {
+            id child = ((id (*)(id, SEL))objc_msgSend)(object, s_reelChildSels[i]);
+            if (child != nil && child != object && YTKACEReelObjectLooksLikeAd(child, depth + 1)) {
+                return YES;
+            }
         }
     }
     return NO;
@@ -326,104 +355,175 @@ static BOOL YTKACEIsAdLayoutIdentifier(NSString *identifier) {
     return [normalized hasPrefix:@"eml_ad_"];
 }
 
+static CFMutableDictionaryRef s_classAdCache = NULL;
+static os_unfair_lock s_classAdLock = OS_UNFAIR_LOCK_INIT;
+
+static SEL s_adSelectors[40];
+static NSUInteger s_adSelectorCount = 0;
+static dispatch_once_t s_adSelectorsOnce;
+
+static void YTKACEInitAdSelectors(void) {
+    const char *names[] = {
+        "isAdRenderer", "isAd", "hasAdLoggingData",
+        "hasAdBadgeRenderer", "hasNativeAdBadgeRenderer",
+        "hasSimpleAdBadgeRenderer", "hasAdSlotRenderer",
+        "hasCompanionAdRenderer", "hasCompactCompanionAdRenderer",
+        "hasMultiItemCompanionAdRenderer", "hasAppPromoCompanionAdRenderer",
+        "hasShoppingCompanionAdRenderer", "hasSuggestedVideosCompanionAdRenderer",
+        "hasCompactPromotedBannerRenderer", "hasCompactPromotedItemRenderer",
+        "hasCompactPromotedVideoRenderer", "hasGridPromotedBannerRenderer",
+        "hasGridPromotedVideoRenderer", "hasPromoted15ClickPtTextCtdWatchRenderer",
+        "hasPromoted15ClickPtTextWatchRenderer", "hasPromoted15ClickTextCtdWatchRenderer",
+        "hasPromoted15ClickTextWatchRenderer", "hasPromotedAppInstallRenderer",
+        "hasPromotedDiscoveryAppPromoCompactFormRenderer",
+        "hasPromotedSparklesTextCtdHomeCompactFormRenderer",
+        "hasPromotedSparklesTextCtdHomeRenderer",
+        "hasPromotedSparklesTextCtdWatch15ClickRenderer",
+        "hasPromotedSparklesTextCtdWatchGridFormRenderer",
+        "hasPromotedSparklesTextCtdWatchWideFormRenderer",
+        "hasPromotedSparklesTextHomeRenderer",
+        "hasPromotedSparklesTextProductHomeRenderer",
+        "hasPromotedSparklesTextProductWatchRenderer",
+        "hasPromotedSparklesTextSearchRenderer",
+        "hasPromotedSparklesTextWatch15ClickRenderer",
+        "hasPromotedSparklesTextWatchGridFormRenderer",
+        "hasPromotedSparklesTextWatchWideFormRenderer",
+        "hasPromotedTextBannerRenderer",
+        "hasPromotedVideoInlineMutedRenderer",
+        "hasPromotedVideoRenderer",
+        "hasShoppingAdInfoCardContentRenderer"
+    };
+    for (size_t i = 0; i < sizeof(names)/sizeof(names[0]); i++) {
+        s_adSelectors[s_adSelectorCount++] = sel_registerName(names[i]);
+    }
+}
+
 static BOOL YTKACEObjectLooksLikeAd(id object) {
     if (object == nil) return NO;
-    if ([objc_getAssociatedObject(object, YTKACEAdMatchAssociation) boolValue]) {
-        return YES;
+    id cachedDecision = objc_getAssociatedObject(object, YTKACEAdMatchAssociation);
+    if (cachedDecision != nil) {
+        return [cachedDecision boolValue];
     }
+
+    Class cls = object_getClass(object);
+    if (cls == Nil) return NO;
+
+    os_unfair_lock_lock(&s_classAdLock);
+    if (s_classAdCache == NULL) {
+        s_classAdCache = CFDictionaryCreateMutable(kCFAllocatorDefault, 0, NULL, NULL);
+    }
+    const void *classDecision = CFDictionaryGetValue(s_classAdCache, (__bridge const void *)cls);
+    os_unfair_lock_unlock(&s_classAdLock);
+
+    if (classDecision != NULL) {
+        BOOL isAd = ((intptr_t)classDecision == 2);
+        objc_setAssociatedObject(object, YTKACEAdMatchAssociation,
+                                 isAd ? @YES : @NO, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        return isAd;
+    }
+
+    dispatch_once(&s_adSelectorsOnce, ^{
+        YTKACEInitAdSelectors();
+    });
+
     BOOL matched = NO;
-    NSString *className = NSStringFromClass([object class]).lowercaseString;
-    if ([className containsString:@"adrenderer"] ||
-        ([className containsString:@"promoted"] &&
-         [className containsString:@"renderer"]) ||
-        [className containsString:@"promorenderer"] ||
-        [className containsString:@"adslotrenderer"] ||
-        [className containsString:@"companionadrenderer"] ||
-        [className containsString:@"shoppingadinfocardcontentrenderer"] ||
-        [className containsString:@"infeedad"] ||
-        [className containsString:@"displayad"]) {
-        matched = YES;
-    }
-    for (NSString *selectorName in @[@"isAdRenderer", @"isAd",
-                                      @"hasAdLoggingData",
-                                      @"hasAdBadgeRenderer",
-                                      @"hasNativeAdBadgeRenderer",
-                                      @"hasSimpleAdBadgeRenderer",
-                                      @"hasAdSlotRenderer",
-                                      @"hasCompanionAdRenderer",
-                                      @"hasCompactCompanionAdRenderer",
-                                      @"hasMultiItemCompanionAdRenderer",
-                                      @"hasAppPromoCompanionAdRenderer",
-                                      @"hasShoppingCompanionAdRenderer",
-                                      @"hasSuggestedVideosCompanionAdRenderer",
-                                      @"hasCompactPromotedBannerRenderer",
-                                      @"hasCompactPromotedItemRenderer",
-                                      @"hasCompactPromotedVideoRenderer",
-                                      @"hasGridPromotedBannerRenderer",
-                                      @"hasGridPromotedVideoRenderer",
-                                      @"hasPromoted15ClickPtTextCtdWatchRenderer",
-                                      @"hasPromoted15ClickPtTextWatchRenderer",
-                                      @"hasPromoted15ClickTextCtdWatchRenderer",
-                                      @"hasPromoted15ClickTextWatchRenderer",
-                                      @"hasPromotedAppInstallRenderer",
-                                      @"hasPromotedDiscoveryAppPromoCompactFormRenderer",
-                                      @"hasPromotedSparklesTextCtdHomeCompactFormRenderer",
-                                      @"hasPromotedSparklesTextCtdHomeRenderer",
-                                      @"hasPromotedSparklesTextCtdWatch15ClickRenderer",
-                                      @"hasPromotedSparklesTextCtdWatchGridFormRenderer",
-                                      @"hasPromotedSparklesTextCtdWatchWideFormRenderer",
-                                      @"hasPromotedSparklesTextHomeRenderer",
-                                      @"hasPromotedSparklesTextProductHomeRenderer",
-                                      @"hasPromotedSparklesTextProductWatchRenderer",
-                                      @"hasPromotedSparklesTextSearchRenderer",
-                                      @"hasPromotedSparklesTextWatch15ClickRenderer",
-                                      @"hasPromotedSparklesTextWatchGridFormRenderer",
-                                      @"hasPromotedSparklesTextWatchWideFormRenderer",
-                                      @"hasPromotedTextBannerRenderer",
-                                      @"hasPromotedVideoInlineMutedRenderer",
-                                      @"hasPromotedVideoRenderer",
-                                      @"hasShoppingAdInfoCardContentRenderer"]) {
-        if (matched) break;
-        SEL selector = NSSelectorFromString(selectorName);
-        if ([object respondsToSelector:selector] &&
-            ((BOOL (*)(id, SEL))objc_msgSend)(object, selector)) {
+    const char *cName = class_getName(cls);
+    if (cName != NULL) {
+        if (strcasestr(cName, "adrenderer") ||
+            (strcasestr(cName, "promoted") && strcasestr(cName, "renderer")) ||
+            strcasestr(cName, "promorenderer") ||
+            strcasestr(cName, "adslotrenderer") ||
+            strcasestr(cName, "companionadrenderer") ||
+            strcasestr(cName, "shoppingadinfocardcontentrenderer") ||
+            strcasestr(cName, "infeedad") ||
+            strcasestr(cName, "displayad")) {
             matched = YES;
         }
     }
-    if (!matched && YTKACEObjectValue(object, @"adLoggingData") != nil) {
-        matched = YES;
-    }
-    for (NSString *selectorName in @[
-        @"adBadgeRenderer", @"nativeAdBadgeRenderer",
-        @"simpleAdBadgeRenderer"
-    ]) {
-        if (matched) break;
-        id value = YTKACEObjectValue(object, selectorName);
-        if (value != nil) {
-            matched = YES;
-        }
-    }
-    for (NSString *selectorName in @[
-        @"identifier", @"layoutIdentifier", @"elementIdentifier",
-        @"accessibilityIdentifier", @"templateIdentifier"
-    ]) {
-        if (matched) break;
-        id value = YTKACEObjectValue(object, selectorName);
-        if ([value isKindOfClass:NSString.class] &&
-            YTKACEIsAdLayoutIdentifier(value)) {
-            matched = YES;
-        }
-    }
+
     if (!matched) {
-        id options = YTKACEObjectValue(object, @"compatibilityOptions");
-        SEL loggingSelector = NSSelectorFromString(@"hasAdLoggingData");
-        matched = [options respondsToSelector:loggingSelector] &&
-            ((BOOL (*)(id, SEL))objc_msgSend)(options, loggingSelector);
+        for (NSUInteger i = 0; i < s_adSelectorCount; i++) {
+            SEL sel = s_adSelectors[i];
+            if ([object respondsToSelector:sel] && ((BOOL (*)(id, SEL))objc_msgSend)(object, sel)) {
+                matched = YES;
+                break;
+            }
+        }
     }
-    if (matched) {
-        objc_setAssociatedObject(object, YTKACEAdMatchAssociation, @YES,
-                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+
+    if (!matched) {
+        static SEL adLoggingDataSel;
+        static dispatch_once_t onceLogging;
+        dispatch_once(&onceLogging, ^{
+            adLoggingDataSel = sel_registerName("adLoggingData");
+        });
+        if ([object respondsToSelector:adLoggingDataSel] &&
+            ((id (*)(id, SEL))objc_msgSend)(object, adLoggingDataSel) != nil) {
+            matched = YES;
+        }
     }
+
+    if (!matched) {
+        static SEL badgeSelectors[3];
+        static dispatch_once_t onceBadges;
+        dispatch_once(&onceBadges, ^{
+            badgeSelectors[0] = sel_registerName("adBadgeRenderer");
+            badgeSelectors[1] = sel_registerName("nativeAdBadgeRenderer");
+            badgeSelectors[2] = sel_registerName("simpleAdBadgeRenderer");
+        });
+        for (int i = 0; i < 3; i++) {
+            if ([object respondsToSelector:badgeSelectors[i]] &&
+                ((id (*)(id, SEL))objc_msgSend)(object, badgeSelectors[i]) != nil) {
+                matched = YES;
+                break;
+            }
+        }
+    }
+
+    if (!matched) {
+        static SEL idSelectors[5];
+        static dispatch_once_t onceIDs;
+        dispatch_once(&onceIDs, ^{
+            idSelectors[0] = sel_registerName("identifier");
+            idSelectors[1] = sel_registerName("layoutIdentifier");
+            idSelectors[2] = sel_registerName("elementIdentifier");
+            idSelectors[3] = sel_registerName("accessibilityIdentifier");
+            idSelectors[4] = sel_registerName("templateIdentifier");
+        });
+        for (int i = 0; i < 5; i++) {
+            if ([object respondsToSelector:idSelectors[i]]) {
+                id val = ((id (*)(id, SEL))objc_msgSend)(object, idSelectors[i]);
+                if ([val isKindOfClass:NSString.class] && YTKACEIsAdLayoutIdentifier((NSString *)val)) {
+                    matched = YES;
+                    break;
+                }
+            }
+        }
+    }
+
+    if (!matched) {
+        static SEL compatSel;
+        static SEL hasLoggingSel;
+        static dispatch_once_t onceCompat;
+        dispatch_once(&onceCompat, ^{
+            compatSel = sel_registerName("compatibilityOptions");
+            hasLoggingSel = sel_registerName("hasAdLoggingData");
+        });
+        if ([object respondsToSelector:compatSel]) {
+            id options = ((id (*)(id, SEL))objc_msgSend)(object, compatSel);
+            if ([options respondsToSelector:hasLoggingSel] &&
+                ((BOOL (*)(id, SEL))objc_msgSend)(options, hasLoggingSel)) {
+                matched = YES;
+            }
+        }
+    }
+
+    os_unfair_lock_lock(&s_classAdLock);
+    CFDictionarySetValue(s_classAdCache, (__bridge const void *)cls, (const void *)(matched ? 2 : 1));
+    os_unfair_lock_unlock(&s_classAdLock);
+
+    objc_setAssociatedObject(object, YTKACEAdMatchAssociation,
+                             matched ? @YES : @NO, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     return matched;
 }
 
@@ -435,22 +535,34 @@ typedef struct {
 } YTKACEASDimension;
 
 static void YTKACECollapseCellNode(id node) {
-    SEL styleSelector = NSSelectorFromString(@"style");
-    if ([node respondsToSelector:styleSelector]) {
-        id style = ((id (*)(id, SEL))objc_msgSend)(node, styleSelector);
+    static SEL styleSel;
+    static SEL setHeightSel;
+    static SEL setMaxHeightSel;
+    static SEL invalidateLayoutSel;
+    static SEL setNeedsLayoutSel;
+    static dispatch_once_t onceNode;
+    dispatch_once(&onceNode, ^{
+        styleSel = sel_registerName("style");
+        setHeightSel = sel_registerName("setHeight:");
+        setMaxHeightSel = sel_registerName("setMaxHeight:");
+        invalidateLayoutSel = sel_registerName("invalidateCalculatedLayout");
+        setNeedsLayoutSel = sel_registerName("setNeedsLayout");
+    });
+    if ([node respondsToSelector:styleSel]) {
+        id style = ((id (*)(id, SEL))objc_msgSend)(node, styleSel);
         YTKACEASDimension zero = {1, 0.0};
-        for (NSString *name in @[@"setHeight:", @"setMaxHeight:"]) {
-            SEL selector = NSSelectorFromString(name);
-            if (![style respondsToSelector:selector]) continue;
-            ((void (*)(id, SEL, YTKACEASDimension))objc_msgSend)(
-                style, selector, zero);
+        if ([style respondsToSelector:setHeightSel]) {
+            ((void (*)(id, SEL, YTKACEASDimension))objc_msgSend)(style, setHeightSel, zero);
+        }
+        if ([style respondsToSelector:setMaxHeightSel]) {
+            ((void (*)(id, SEL, YTKACEASDimension))objc_msgSend)(style, setMaxHeightSel, zero);
         }
     }
-    for (NSString *name in @[@"invalidateCalculatedLayout", @"setNeedsLayout"]) {
-        SEL selector = NSSelectorFromString(name);
-        if ([node respondsToSelector:selector]) {
-            ((void (*)(id, SEL))objc_msgSend)(node, selector);
-        }
+    if ([node respondsToSelector:invalidateLayoutSel]) {
+        ((void (*)(id, SEL))objc_msgSend)(node, invalidateLayoutSel);
+    }
+    if ([node respondsToSelector:setNeedsLayoutSel]) {
+        ((void (*)(id, SEL))objc_msgSend)(node, setNeedsLayoutSel);
     }
 }
 
@@ -460,14 +572,8 @@ static void YTKACECollapseAdCell(UIView *cell) {
     frame.size.height = 0.0;
     cell.frame = frame;
     cell.hidden = YES;
+    cell.alpha = 0.0;
     cell.userInteractionEnabled = NO;
-    for (UIView *ancestor = cell.superview; ancestor != nil;
-         ancestor = ancestor.superview) {
-        if ([ancestor isKindOfClass:UICollectionView.class]) {
-            [((UICollectionView *)ancestor).collectionViewLayout invalidateLayout];
-            break;
-        }
-    }
 }
 
 void YTKACEHandleAdCellLayout(UIView *cell) {
@@ -480,16 +586,24 @@ void YTKACEHandleAdCellReuse(UIView *cell) {
     objc_setAssociatedObject(cell, YTKACEAdCellAssociation, nil,
                              OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     cell.hidden = NO;
+    cell.alpha = 1.0;
     cell.userInteractionEnabled = YES;
 }
 
 void YTKACECollapseHostCell(UIView *view) {
     if (view == nil) return;
+    static Class uiCellClass;
+    static Class asCellClass;
+    static dispatch_once_t onceCell;
+    dispatch_once(&onceCell, ^{
+        uiCellClass = [UICollectionViewCell class];
+        asCellClass = NSClassFromString(@"_ASCollectionViewCell");
+    });
+
     UIView *cell = nil;
-    for (UIView *ancestor = view; ancestor != nil;
-         ancestor = ancestor.superview) {
-        if ([ancestor isKindOfClass:UICollectionViewCell.class] ||
-            [NSStringFromClass([ancestor class]) hasSuffix:@"CollectionViewCell"]) {
+    for (UIView *ancestor = view; ancestor != nil; ancestor = ancestor.superview) {
+        if ([ancestor isKindOfClass:uiCellClass] ||
+            (asCellClass != Nil && [ancestor isKindOfClass:asCellClass])) {
             cell = ancestor;
             break;
         }
@@ -504,7 +618,17 @@ void YTKACECollapseHostCell(UIView *view) {
     objc_setAssociatedObject(cell, YTKACEAdCellAssociation, @YES,
                              OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     YTKACECollapseAdCell(cell);
-    SEL nodeSelector = NSSelectorFromString(@"node");
+    for (UIView *ancestor = cell.superview; ancestor != nil; ancestor = ancestor.superview) {
+        if ([ancestor isKindOfClass:UICollectionView.class]) {
+            [((UICollectionView *)ancestor).collectionViewLayout invalidateLayout];
+            break;
+        }
+    }
+    static SEL nodeSelector;
+    static dispatch_once_t onceNodeSel;
+    dispatch_once(&onceNodeSel, ^{
+        nodeSelector = sel_registerName("node");
+    });
     if ([cell respondsToSelector:nodeSelector]) {
         id node = ((id (*)(id, SEL))objc_msgSend)(cell, nodeSelector);
         if (node != nil) {
@@ -742,9 +866,15 @@ static void YTKACEVideoNodeSetEntry(id receiver, SEL selector, id entry) {
                              OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     if (!isAd) return;
     YTKACECollapseCellNode(receiver);
-    SEL overlay = NSSelectorFromString(@"dismissedCellOverlayView");
-    SEL setOverlay = NSSelectorFromString(@"setDismissedCellOverlayView:");
-    SEL resize = NSSelectorFromString(@"resizeDismissedView");
+    static SEL overlay;
+    static SEL setOverlay;
+    static SEL resize;
+    static dispatch_once_t onceNodeSelectors;
+    dispatch_once(&onceNodeSelectors, ^{
+        overlay = sel_registerName("dismissedCellOverlayView");
+        setOverlay = sel_registerName("setDismissedCellOverlayView:");
+        resize = sel_registerName("resizeDismissedView");
+    });
     if ([receiver respondsToSelector:overlay] &&
         [receiver respondsToSelector:setOverlay] &&
         ((id (*)(id, SEL))objc_msgSend)(receiver, overlay) == nil) {
@@ -752,15 +882,9 @@ static void YTKACEVideoNodeSetEntry(id receiver, SEL selector, id entry) {
         placeholder.hidden = YES;
         ((void (*)(id, SEL, id))objc_msgSend)(receiver, setOverlay, placeholder);
     }
-    if (![receiver respondsToSelector:resize]) return;
-    dispatch_async(dispatch_get_main_queue(), ^{
-        if (!YTKACEIsAdNode(receiver)) return;
+    if ([receiver respondsToSelector:resize]) {
         ((void (*)(id, SEL))objc_msgSend)(receiver, resize);
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
-                                     (int64_t)(0.6 * NSEC_PER_SEC)),
-                       dispatch_get_main_queue(), ^{
-        });
-    });
+    }
 }
 
 static BOOL YTKACEVideoNodeShouldShrink(id receiver, SEL selector) {

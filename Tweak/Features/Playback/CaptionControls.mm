@@ -161,21 +161,21 @@ static id YTKACEMatchingTrack(id player) {
     id available = YTKACECaptionValueForKey(video, @"availableCaptionTracks")
         ?: YTKACECaptionValueForKey(player, @"availableCaptionTracks");
     if (![available isKindOfClass:NSArray.class]) return YTKACERememberedTrack;
+    id languageMatch = nil;
     for (id track in (NSArray *)available) {
         NSString *vssID = YTKACECaptionString(track, @"VSSID");
         if (YTKACERememberedVSSID.length != 0 &&
             [vssID isEqualToString:YTKACERememberedVSSID]) {
             return track;
         }
-    }
-    for (id track in (NSArray *)available) {
-        NSString *language = YTKACECaptionString(track, @"languageCode");
-        if (YTKACERememberedLanguage.length != 0 &&
-            [language isEqualToString:YTKACERememberedLanguage]) {
-            return track;
+        if (languageMatch == nil && YTKACERememberedLanguage.length != 0) {
+            NSString *language = YTKACECaptionString(track, @"languageCode");
+            if ([language isEqualToString:YTKACERememberedLanguage]) {
+                languageMatch = track;
+            }
         }
     }
-    return YTKACERememberedTrack;
+    return languageMatch ?: YTKACERememberedTrack;
 }
 
 
@@ -232,8 +232,10 @@ void YTKACEApplyPreferredCaptionLanguage(id player) {
     NSInteger exactRank = NSIntegerMax;
     id prefix = nil;
     NSMutableArray<NSString *> *vssList = [NSMutableArray array];
+    NSMutableArray<NSString *> *codes = [NSMutableArray arrayWithCapacity:[available count]];
     for (id track in (NSArray *)available) {
         NSString *code = YTKACETrackLanguage(track);
+        [codes addObject:code ?: @"?"];
         if (code.length == 0) continue;
         NSString *vss = YTKACECaptionString(track, @"VSSID") ?: @"";
         if ([code caseInsensitiveCompare:preferred] == NSOrderedSame) {
@@ -259,10 +261,6 @@ void YTKACEApplyPreferredCaptionLanguage(id player) {
         YTKACEDownloadLog(@"caption", @"candidates %@ picked rank=%ld",
                           [vssList componentsJoinedByString:@","],
                           (long)exactRank);
-    }
-    NSMutableArray<NSString *> *codes = [NSMutableArray array];
-    for (id track in (NSArray *)available) {
-        [codes addObject:YTKACETrackLanguage(track) ?: @"?"];
     }
     YTKACEDownloadLog(@"caption",
                       @"apply preferred=%@ count=%lu tracks=%@ active=%@ "

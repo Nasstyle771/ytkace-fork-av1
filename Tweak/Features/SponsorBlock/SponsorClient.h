@@ -10,6 +10,7 @@ typedef void (^YTKACESponsorCompletion)(
 + (instancetype)sharedClient;
 - (void)segmentsForVideoID:(NSString *)videoID
                 completion:(YTKACESponsorCompletion)completion;
+- (void)clearCache;
 @end
 
 NS_ASSUME_NONNULL_END

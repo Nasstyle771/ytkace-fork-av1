@@ -2,6 +2,82 @@
 #import "SponsorPreferences.h"
 #import <math.h>
 
+static NSString *YTKACESponsorDiskCacheDirectory(void) {
+    static NSString *dir;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        NSString *caches = [NSSearchPathForDirectoriesInDomains(
+            NSCachesDirectory, NSUserDomainMask, YES) firstObject];
+        dir = [caches stringByAppendingPathComponent:@"YTKACESponsorBlock"];
+        [NSFileManager.defaultManager createDirectoryAtPath:dir
+                                withIntermediateDirectories:YES
+                                                 attributes:nil
+                                                      error:nil];
+    });
+    return dir;
+}
+
+static NSString *YTKACESponsorDiskPathForKey(NSString *key) {
+    NSMutableString *safe = [NSMutableString stringWithCapacity:key.length];
+    for (NSUInteger i = 0; i < key.length; i++) {
+        unichar c = [key characterAtIndex:i];
+        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+            (c >= '0' && c <= '9') || c == '-' || c == '_') {
+            [safe appendFormat:@"%C", c];
+        } else {
+            [safe appendString:@"_"];
+        }
+    }
+    if (safe.length > 70) {
+        safe = [[safe substringToIndex:70] mutableCopy];
+    }
+    NSString *filename = [NSString stringWithFormat:@"sb_%@_%lx.json", safe, (unsigned long)[key hash]];
+    return [YTKACESponsorDiskCacheDirectory() stringByAppendingPathComponent:filename];
+}
+
+static dispatch_queue_t YTKACESponsorDiskQueue(void) {
+    static dispatch_queue_t queue;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        queue = dispatch_queue_create("com.ytkace.sponsorblock.disk", DISPATCH_QUEUE_SERIAL);
+    });
+    return queue;
+}
+
+static NSArray *YTKACESponsorLoadFromDisk(NSString *key) {
+    NSString *path = YTKACESponsorDiskPathForKey(key);
+    if (![NSFileManager.defaultManager fileExistsAtPath:path]) {
+        return nil;
+    }
+    NSData *data = [NSData dataWithContentsOfFile:path];
+    if (data.length == 0) return nil;
+    id json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+    if ([json isKindOfClass:NSDictionary.class]) {
+        id segs = json[@"segments"];
+        if ([segs isKindOfClass:NSArray.class]) {
+            return segs;
+        }
+    } else if ([json isKindOfClass:NSArray.class]) {
+        return json;
+    }
+    return nil;
+}
+
+static void YTKACESponsorSaveToDisk(NSString *key, NSArray *segments) {
+    dispatch_async(YTKACESponsorDiskQueue(), ^{
+        NSString *path = YTKACESponsorDiskPathForKey(key);
+        NSDictionary *wrapper = @{
+            @"v": @1,
+            @"t": @(NSDate.date.timeIntervalSince1970),
+            @"segments": segments ?: @[]
+        };
+        NSData *data = [NSJSONSerialization dataWithJSONObject:wrapper options:0 error:nil];
+        if (data != nil) {
+            [data writeToFile:path atomically:YES];
+        }
+    });
+}
+
 @interface YTKACESponsorClient ()
 @property(nonatomic, strong) NSCache<NSString *, NSArray *> *cache;
 @property(nonatomic, strong) NSURLSession *session;
@@ -22,16 +98,28 @@
     self = [super init];
     if (self) {
         _cache = [NSCache new];
-        _cache.countLimit = 128;
+        _cache.countLimit = 256;
 
         NSURLSessionConfiguration *configuration =
             NSURLSessionConfiguration.ephemeralSessionConfiguration;
-        configuration.timeoutIntervalForRequest = 10.0;
-        configuration.timeoutIntervalForResource = 15.0;
+        configuration.timeoutIntervalForRequest = 6.0;
+        configuration.timeoutIntervalForResource = 10.0;
         configuration.requestCachePolicy = NSURLRequestReloadIgnoringLocalCacheData;
         _session = [NSURLSession sessionWithConfiguration:configuration];
     }
     return self;
+}
+
+- (void)clearCache {
+    [self.cache removeAllObjects];
+    dispatch_async(YTKACESponsorDiskQueue(), ^{
+        NSString *dir = YTKACESponsorDiskCacheDirectory();
+        NSArray *files = [NSFileManager.defaultManager contentsOfDirectoryAtPath:dir error:nil];
+        for (NSString *file in files) {
+            NSString *fullPath = [dir stringByAppendingPathComponent:file];
+            [NSFileManager.defaultManager removeItemAtPath:fullPath error:nil];
+        }
+    });
 }
 
 - (void)segmentsForVideoID:(NSString *)videoID
@@ -49,9 +137,18 @@
     NSString *cacheKey = [NSString stringWithFormat:@"%@|%@", videoID,
                           [categories componentsJoinedByString:@","]];
 
+    // 1. Fast in-memory cache check
     NSArray *cached = [self.cache objectForKey:cacheKey];
     if (cached != nil) {
         completion(cached);
+        return;
+    }
+
+    // 2. Persistent disk cache check
+    NSArray *diskCached = YTKACESponsorLoadFromDisk(cacheKey);
+    if (diskCached != nil) {
+        [self.cache setObject:diskCached forKey:cacheKey];
+        completion(diskCached);
         return;
     }
 
@@ -86,7 +183,26 @@
                 ? (NSHTTPURLResponse *)response
                 : nil;
 
-        if (error == nil && http.statusCode == 200 && data.length <= 1024 * 1024) {
+        // If offline or network error, fallback to disk cache if available
+        if (error != nil) {
+            NSArray *fallback = YTKACESponsorLoadFromDisk(cacheKey) ?: @[];
+            dispatch_async(dispatch_get_main_queue(), ^{
+                completion(fallback);
+            });
+            return;
+        }
+
+        // SponsorBlock returns 404 when no segments exist for the video
+        if (http.statusCode == 404) {
+            [weakSelf.cache setObject:@[] forKey:cacheKey];
+            YTKACESponsorSaveToDisk(cacheKey, @[]);
+            dispatch_async(dispatch_get_main_queue(), ^{
+                completion(@[]);
+            });
+            return;
+        }
+
+        if (http.statusCode == 200 && data.length <= 1024 * 1024) {
             id json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
             if ([json isKindOfClass:NSArray.class]) {
                 for (id item in (NSArray *)json) {
@@ -125,9 +241,10 @@
             ^NSComparisonResult(NSDictionary *left, NSDictionary *right) {
                 return [left[@"start"] compare:right[@"start"]];
             }];
-        if (result.count != 0) {
-            [weakSelf.cache setObject:result forKey:cacheKey];
-        }
+
+        [weakSelf.cache setObject:result forKey:cacheKey];
+        YTKACESponsorSaveToDisk(cacheKey, result);
+
         dispatch_async(dispatch_get_main_queue(), ^{
             completion(result);
         });

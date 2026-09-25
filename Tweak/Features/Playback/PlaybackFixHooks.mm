@@ -32,17 +32,20 @@
 #import <UIKit/UIKit.h>
 #import <objc/message.h>
 #import <objc/runtime.h>
+#import <QuartzCore/QuartzCore.h>
+#include "PlaybackWatchdog.hpp"
 
 static NSString *const YTKACEPlaybackFixKey = @"YTKACE.Preference.Playback.Fix";
-static const NSTimeInterval YTKACEStallGrace = 0.8;
-static const double YTKACEProgressEpsilon = 0.15;
 
 static NSString *const YTKACEPlaybackErrorDomain =
     @"com.google.ios.youtube.ErrorDomain.playback";
 
+static ytkace::PlaybackWatchdog gWatchdog;
+static dispatch_source_t gWatchdogTimer = nil;
 static double gLatestTime = 0.0;
-static BOOL gIsTimeToRetry = NO;
-static bool gEmergencyCheckRunning = false;
+static double gLastObservedProgressTime = 0.0;
+static __weak id gActivePlayerController = nil;
+static __weak id gActiveOverlayController = nil;
 
 static IMP OriginalCurrentVideoMediaTime;
 static IMP OriginalSeekToTime;
@@ -86,6 +89,7 @@ static void YTKACESendRetryEvent(id overlay, NSString *stage) {
 }
 
 static void YTKACESeek(id player, double position, NSString *stage) {
+    if (player == nil) return;
     SEL seek = NSSelectorFromString(@"seekToTime:");
     if (![player respondsToSelector:seek]) {
         YTKACEDownloadLog(@"fix", @"%@ seek unavailable", stage);
@@ -96,6 +100,7 @@ static void YTKACESeek(id player, double position, NSString *stage) {
 }
 
 static void YTKACEReplay(id player, NSString *stage) {
+    if (player == nil) return;
     SEL replay = NSSelectorFromString(@"replay");
     if (![player respondsToSelector:replay]) {
         YTKACEDownloadLog(@"fix", @"%@ replay unavailable on %@", stage,
@@ -107,6 +112,7 @@ static void YTKACEReplay(id player, NSString *stage) {
 }
 
 static void YTKACEScheduleCaptionRestore(id player) {
+    if (player == nil) return;
     __weak id weakPlayer = player;
     const double delays[] = { 0.6, 1.5, 3.0 };
     for (size_t index = 0; index < sizeof(delays) / sizeof(delays[0]); index++) {
@@ -118,10 +124,86 @@ static void YTKACEScheduleCaptionRestore(id player) {
     }
 }
 
-static double YTKACEPosition(id player) {
-    SEL time = NSSelectorFromString(@"currentVideoMediaTime");
-    if (![player respondsToSelector:time]) return -1.0;
-    return ((double (*)(id, SEL))objc_msgSend)(player, time);
+static void YTKACECancelWatchdogTimer(void) {
+    if (gWatchdogTimer != nil) {
+        dispatch_source_cancel(gWatchdogTimer);
+        gWatchdogTimer = nil;
+    }
+}
+
+static void YTKACEWatchdogTimerFired(void);
+
+static void YTKACEArmWatchdogTimer(double seconds) {
+    YTKACECancelWatchdogTimer();
+    if (seconds <= 0.0) return;
+    gWatchdogTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
+    if (gWatchdogTimer == nil) return;
+    dispatch_source_set_timer(gWatchdogTimer,
+                              dispatch_time(DISPATCH_TIME_NOW, (int64_t)(seconds * NSEC_PER_SEC)),
+                              DISPATCH_TIME_FOREVER,
+                              (int64_t)(0.02 * NSEC_PER_SEC));
+    dispatch_source_set_event_handler(gWatchdogTimer, ^{
+        YTKACEWatchdogTimerFired();
+    });
+    dispatch_resume(gWatchdogTimer);
+}
+
+static void YTKACEApplyWatchdogOutcome(const ytkace::WatchdogOutcome &outcome) {
+    if (outcome.cancelTimers) {
+        YTKACECancelWatchdogTimer();
+    }
+    if (outcome.armTimerIn > 0.0) {
+        YTKACEArmWatchdogTimer(outcome.armTimerIn);
+    }
+    switch (outcome.action) {
+        case ytkace::WatchdogAction::None:
+            break;
+        case ytkace::WatchdogAction::Resume: {
+            YTKACEDownloadLog(@"fix", @"watchdog ladder: Resume at %.2f", gLatestTime);
+            id player = gActivePlayerController;
+            if (player != nil) {
+                YTKACECaptionsSnapshot(player);
+                SEL playSel = NSSelectorFromString(@"play");
+                if ([player respondsToSelector:playSel]) {
+                    ((void (*)(id, SEL))objc_msgSend)(player, playSel);
+                }
+            }
+            if (gActiveOverlayController != nil) {
+                YTKACESendRetryEvent(gActiveOverlayController, @"watchdog-resume");
+            }
+            break;
+        }
+        case ytkace::WatchdogAction::Nudge: {
+            YTKACEDownloadLog(@"fix", @"watchdog ladder: Nudge at %.2f", gLatestTime);
+            id player = gActivePlayerController;
+            if (player != nil) {
+                YTKACESeek(player, gLatestTime, @"watchdog-nudge");
+                YTKACEReplay(player, @"watchdog-nudge");
+                YTKACEScheduleCaptionRestore(player);
+            }
+            break;
+        }
+        case ytkace::WatchdogAction::Reload: {
+            YTKACEDownloadLog(@"fix", @"watchdog ladder: Reload at %.2f", gLatestTime);
+            if (gActiveOverlayController != nil) {
+                YTKACESendRetryEvent(gActiveOverlayController, @"watchdog-reload");
+            }
+            id player = gActivePlayerController;
+            if (player != nil) {
+                YTKACESeek(player, gLatestTime, @"watchdog-reload");
+                YTKACEReplay(player, @"watchdog-reload");
+                YTKACEScheduleCaptionRestore(player);
+            }
+            break;
+        }
+    }
+}
+
+static void YTKACEWatchdogTimerFired(void) {
+    YTKACECancelWatchdogTimer();
+    const double now = CACurrentMediaTime();
+    ytkace::WatchdogOutcome outcome = gWatchdog.handle(ytkace::WatchdogEvent::TimerFired, now, gLatestTime);
+    YTKACEApplyWatchdogOutcome(outcome);
 }
 
 static double YTKACECurrentVideoMediaTime(id receiver, SEL selector) {
@@ -129,11 +211,26 @@ static double YTKACECurrentVideoMediaTime(id receiver, SEL selector) {
         ? 0.0
         : ((double (*)(id, SEL))OriginalCurrentVideoMediaTime)(receiver, selector);
     gLatestTime = value;
+    gActivePlayerController = receiver;
+    if (YTKACEPlaybackFixEnabled()) {
+        const double now = CACurrentMediaTime();
+        if (now - gLastObservedProgressTime >= 0.25) {
+            gLastObservedProgressTime = now;
+            ytkace::WatchdogOutcome outcome = gWatchdog.handle(ytkace::WatchdogEvent::ProgressObserved, now, value);
+            YTKACEApplyWatchdogOutcome(outcome);
+        }
+    }
     return value;
 }
 
 static void YTKACESeekToTime(id receiver, SEL selector, double time) {
     gLatestTime = time;
+    gActivePlayerController = receiver;
+    if (YTKACEPlaybackFixEnabled()) {
+        const double now = CACurrentMediaTime();
+        ytkace::WatchdogOutcome outcome = gWatchdog.handle(ytkace::WatchdogEvent::UserScrub, now, time);
+        YTKACEApplyWatchdogOutcome(outcome);
+    }
     if (OriginalSeekToTime != NULL) {
         ((void (*)(id, SEL, double))OriginalSeekToTime)(receiver, selector, time);
     }
@@ -151,107 +248,42 @@ static void YTKACEHandleError(id receiver, SEL selector, id error) {
         return;
     }
 
-    if (gIsTimeToRetry) {
-        YTKACEDownloadLog(@"fix", @"retry already in flight, passing through");
-        YTKACECallOriginalHandleError(receiver, selector, error);
-        return;
-    }
-
+    gActiveOverlayController = receiver;
     NSError *failure = [error isKindOfClass:NSError.class] ? (NSError *)error : nil;
+    BOOL isPlaybackError = NO;
     if (failure != nil) {
         YTKACEDownloadLog(@"fix", @"handleError domain=%@ code=%ld",
                           failure.domain, (long)failure.code);
-    } else {
-        YTKACEDownloadLog(@"fix", @"handleError non-NSError %@",
-                          NSStringFromClass([error class]));
+        if ([failure.domain isEqualToString:YTKACEPlaybackErrorDomain] &&
+            (failure.code == 14 || failure.code == 0)) {
+            isPlaybackError = YES;
+        } else if ([failure.domain isEqualToString:NSURLErrorDomain]) {
+            // Network dropout: lost connection, timeout, cannot connect
+            isPlaybackError = YES;
+        }
     }
 
-    if (failure != nil &&
-        [failure.domain isEqualToString:YTKACEPlaybackErrorDomain] &&
-        (failure.code == 14 || failure.code == 0)) {
-        gIsTimeToRetry = YES;
-
+    if (isPlaybackError) {
         SEL parentGetter = NSSelectorFromString(@"parentViewController");
-        id pvc = [receiver respondsToSelector:parentGetter]
-            ? ((id (*)(id, SEL))objc_msgSend)(receiver, parentGetter)
-            : nil;
-        const double savedTime = gLatestTime;
-        YTKACEDownloadLog(@"fix", @"intercepted code=%ld at %.2f parent=%@",
-                          (long)failure.code, savedTime,
-                          pvc == nil ? @"nil" : NSStringFromClass([pvc class]));
-
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
-                                     (int64_t)(YTKACEStallGrace * NSEC_PER_SEC)),
-                       dispatch_get_main_queue(), ^{
-            const double moved = YTKACEPosition(pvc);
-            if (moved > savedTime + YTKACEProgressEpsilon) {
-                gIsTimeToRetry = NO;
-                YTKACEDownloadLog(@"fix", @"still playing %.2f -> %.2f, no retry",
-                                  savedTime, moved);
-                return;
-            }
-            YTKACEDownloadLog(@"fix", @"stalled at %.2f, retrying", savedTime);
-            YTKACECaptionsSnapshot(pvc);
-            YTKACESendRetryEvent(receiver, @"primary");
-
-            if (pvc) {
-                dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
-                                             (int64_t)(0.20 * NSEC_PER_SEC)),
-                               dispatch_get_main_queue(), ^{
-                    YTKACESeek(pvc, savedTime, @"primary");
-
-                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
-                                                 (int64_t)(0.10 * NSEC_PER_SEC)),
-                                   dispatch_get_main_queue(), ^{
-                        YTKACEReplay(pvc, @"primary");
-                        YTKACEScheduleCaptionRestore(pvc);
-
-                        if (!gEmergencyCheckRunning) {
-                            gEmergencyCheckRunning = true;
-
-                            dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
-                                                         (int64_t)(1.00 * NSEC_PER_SEC)),
-                                           dispatch_get_main_queue(), ^{
-                                const double currentTime = YTKACEPosition(pvc);
-                                YTKACEDownloadLog(@"fix",
-                                    @"verify saved=%.2f now=%.2f", savedTime,
-                                    currentTime);
-
-                                if (currentTime <= savedTime + 0.05) {
-                                    YTKACEDownloadLog(@"fix", @"still stalled");
-                                    YTKACESendRetryEvent(receiver, @"emergency");
-                                    YTKACESeek(pvc, savedTime, @"emergency");
-
-                                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
-                                                                 (int64_t)(0.20 * NSEC_PER_SEC)),
-                                                   dispatch_get_main_queue(), ^{
-                                        YTKACEReplay(pvc, @"emergency");
-                                        YTKACEScheduleCaptionRestore(pvc);
-                                        gIsTimeToRetry = NO;
-                                        YTKACEDownloadLog(@"fix", @"emergency done");
-                                    });
-                                } else {
-                                    gIsTimeToRetry = NO;
-                                    YTKACEDownloadLog(@"fix", @"recovered");
-                                }
-
-                                gEmergencyCheckRunning = false;
-                            });
-                        } else {
-                            YTKACEDownloadLog(@"fix", @"emergency check busy");
-                        }
-                    });
-                });
-            } else {
-                gIsTimeToRetry = NO;
-                YTKACEDownloadLog(@"fix", @"no parent view controller");
-            }
-        });
-
+        if ([receiver respondsToSelector:parentGetter]) {
+            id pvc = ((id (*)(id, SEL))objc_msgSend)(receiver, parentGetter);
+            if (pvc != nil) gActivePlayerController = pvc;
+        }
+        const double now = CACurrentMediaTime();
+        ytkace::WatchdogOutcome outcome = gWatchdog.handle(ytkace::WatchdogEvent::ErrorReported, now, gLatestTime);
+        YTKACEApplyWatchdogOutcome(outcome);
         return;
     }
 
     YTKACECallOriginalHandleError(receiver, selector, error);
+}
+
+static void YTKACEPlaybackStalledNotification(NSNotification *note) {
+    (void)note;
+    if (!YTKACEPlaybackFixEnabled()) return;
+    const double now = CACurrentMediaTime();
+    ytkace::WatchdogOutcome outcome = gWatchdog.handle(ytkace::WatchdogEvent::StalledState, now, gLatestTime);
+    YTKACEApplyWatchdogOutcome(outcome);
 }
 
 void YTKACEInstallPlaybackFixHooks(void) {
@@ -264,6 +296,15 @@ void YTKACEInstallPlaybackFixHooks(void) {
     const BOOL handle = YTKACEInstallInstanceHook(
         @"YTMainAppVideoPlayerOverlayViewController", @"handleError:",
         (IMP)YTKACEHandleError, &OriginalHandleError);
+
+    [NSNotificationCenter.defaultCenter
+        addObserverForName:AVPlayerItemPlaybackStalledNotification
+                    object:nil
+                     queue:NSOperationQueue.mainQueue
+                usingBlock:^(NSNotification *note) {
+        YTKACEPlaybackStalledNotification(note);
+    }];
+
     YTKACEDownloadLog(@"fix", @"hooks time=%d seek=%d handle=%d enabled=%d",
                       time, seek, handle, YTKACEPlaybackFixEnabled());
 }

@@ -189,10 +189,12 @@ static NSString *YTKACEClockText(double seconds) {
 
 - (void)pausePlayback {
     id controller = self.playerController;
-    SEL pause = NSSelectorFromString(@"pause");
-    if ([controller respondsToSelector:pause]) {
-        ((void (*)(id, SEL))objc_msgSend)(controller, pause);
-        return;
+    for (NSString *name in @[@"pause", @"suspendPlayback"]) {
+        SEL pause = NSSelectorFromString(name);
+        if ([controller respondsToSelector:pause]) {
+            ((void (*)(id, SEL))objc_msgSend)(controller, pause);
+            return;
+        }
     }
     UIView *root = self.overlay;
     while (root.superview != nil) root = root.superview;

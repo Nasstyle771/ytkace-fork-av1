@@ -125,8 +125,12 @@ static UIViewController *YTKACETopController(void) {
 }
 
 static void YTKACESeekToTime(id controller, double time) {
-    SEL selector = NSSelectorFromString(@"seekToTime:");
-    if ([controller respondsToSelector:selector]) {
+    static SEL selector;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        selector = @selector(seekToTime:);
+    });
+    if (controller != nil && [controller respondsToSelector:selector]) {
         ((void (*)(id, SEL, double))objc_msgSend)(controller, selector, time);
     }
 }
@@ -220,13 +224,15 @@ static void YTKACEShowSponsorSkippedHUD(id controller, double start, NSString *c
 static void YTKACEPerformSponsorSkip(id controller, double start, double end,
                                      NSString *category) {
     YTKACESeekToTime(controller, end);
-    YTKACEShowSponsorSkippedHUD(controller, start, category);
-    if (YTKACESponsorFeedbackEnabled()) {
-        AudioServicesPlaySystemSound(1057);
-        UINotificationFeedbackGenerator *feedback =
-            [UINotificationFeedbackGenerator new];
-        [feedback notificationOccurred:UINotificationFeedbackTypeSuccess];
-    }
+    dispatch_async(dispatch_get_main_queue(), ^{
+        YTKACEShowSponsorSkippedHUD(controller, start, category);
+        if (YTKACESponsorFeedbackEnabled()) {
+            AudioServicesPlaySystemSound(1057);
+            UINotificationFeedbackGenerator *feedback =
+                [UINotificationFeedbackGenerator new];
+            [feedback notificationOccurred:UINotificationFeedbackTypeSuccess];
+        }
+    });
 }
 
 @interface YTKACESponsorSkipTarget : NSObject
@@ -313,13 +319,36 @@ static void YTKACEAskToSkipSponsor(id controller, double start, double end,
     });
 }
 
+static const void *YTKACESponsorLastTimeAssociation = &YTKACESponsorLastTimeAssociation;
+
+static NSInteger YTKACESponsorBinarySearch(NSArray<NSDictionary<NSString *, id> *> *segments, double time) {
+    NSInteger count = (NSInteger)segments.count;
+    if (count == 0) return -1;
+    NSInteger low = 0;
+    NSInteger high = count - 1;
+    NSInteger best = -1;
+    while (low <= high) {
+        NSInteger mid = low + (high - low) / 2;
+        double start = [segments[mid][@"start"] doubleValue];
+        if (start <= time) {
+            best = mid;
+            low = mid + 1;
+        } else {
+            high = mid - 1;
+        }
+    }
+    return best;
+}
+
 static void YTKACEEvaluateSponsorTime(id controller, double time) {
-    if (!YTKACESponsorBlockEnabled()) {
+    if (!YTKACESponsorBlockEnabled() || controller == nil) {
         return;
     }
 
     NSArray<NSDictionary<NSString *, id> *> *segments =
         objc_getAssociatedObject(controller, YTKACESponsorSegmentsAssociation);
+    if (segments.count == 0) return;
+
     NSMutableSet<NSNumber *> *skipped =
         objc_getAssociatedObject(controller, YTKACESponsorSkippedAssociation);
     if (skipped == nil) {
@@ -330,28 +359,45 @@ static void YTKACEEvaluateSponsorTime(id controller, double time) {
                                  OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
 
-    [segments enumerateObjectsUsingBlock:
-        ^(NSDictionary<NSString *, id> *segment, NSUInteger index, BOOL *stop) {
-            double start = [segment[@"start"] doubleValue];
-            double end = [segment[@"end"] doubleValue];
-            NSString *category = [segment[@"category"] isKindOfClass:NSString.class]
-                ? segment[@"category"] : @"sponsor";
-            NSInteger behavior = YTKACESponsorCategoryBehavior(category);
-            if (behavior == 2 || behavior == 3) return;
-            NSNumber *token = @(index);
-            if (time < start - 1.0) {
+    // Handle rewind / backward scrub: only clear tokens if time jumped back > 1.0s
+    NSNumber *lastTimeVal = objc_getAssociatedObject(controller, YTKACESponsorLastTimeAssociation);
+    double lastTime = lastTimeVal ? [lastTimeVal doubleValue] : time;
+    if (time < lastTime - 1.0) {
+        for (NSNumber *token in [skipped copy]) {
+            NSUInteger idx = [token unsignedIntegerValue];
+            if (idx < segments.count && [segments[idx][@"start"] doubleValue] > time + 0.5) {
                 [skipped removeObject:token];
             }
-            if (time >= start && time < end - 0.25 && ![skipped containsObject:token]) {
+        }
+    }
+    objc_setAssociatedObject(controller,
+                             YTKACESponsorLastTimeAssociation,
+                             @(time),
+                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+
+    // O(log N) binary search for candidate segment
+    NSInteger candidate = YTKACESponsorBinarySearch(segments, time);
+    if (candidate < 0) return;
+
+    NSDictionary<NSString *, id> *segment = segments[candidate];
+    double start = [segment[@"start"] doubleValue];
+    double end = [segment[@"end"] doubleValue];
+    if (time >= start && time < end - 0.25) {
+        NSString *category = [segment[@"category"] isKindOfClass:NSString.class]
+            ? segment[@"category"] : @"sponsor";
+        NSInteger behavior = YTKACESponsorCategoryBehavior(category);
+        if (behavior != 2 && behavior != 3) {
+            NSNumber *token = @(candidate);
+            if (![skipped containsObject:token]) {
                 [skipped addObject:token];
                 if (behavior == 1) {
                     YTKACEAskToSkipSponsor(controller, start, end, category);
                 } else {
                     YTKACEPerformSponsorSkip(controller, start, end, category);
                 }
-                *stop = YES;
             }
-        }];
+        }
+    }
 }
 
 static void YTKACEDidActivateVideo(id receiver,
@@ -417,6 +463,19 @@ static void YTKACEDidActivateVideo(id receiver,
     }];
 }
 
+static inline double YTKACECurrentVideoMediaTime(id receiver, double fallbackTime) {
+    static SEL mediaTimeSel;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        mediaTimeSel = @selector(currentVideoMediaTime);
+    });
+    if (receiver != nil && [receiver respondsToSelector:mediaTimeSel]) {
+        double current = ((double (*)(id, SEL))objc_msgSend)(receiver, mediaTimeSel);
+        if (current > 0.0) return current;
+    }
+    return fallbackTime;
+}
+
 static void YTKACESingleVideoTimeChanged(id receiver,
                                          SEL selector,
                                          id video,
@@ -426,8 +485,7 @@ static void YTKACESingleVideoTimeChanged(id receiver,
             receiver, selector, video, time
         );
     }
-    double current = YTKACEDoubleMessage(receiver, @[@"currentVideoMediaTime"]);
-    double resolved = current > 0.0 ? current : time;
+    double resolved = YTKACECurrentVideoMediaTime(receiver, time);
     if (YTKACESponsorTimeUpdatesEnabled) {
         YTKACEEvaluateSponsorTime(receiver, resolved);
     }
@@ -443,8 +501,7 @@ static void YTKACEMutatedVideoTimeChanged(id receiver,
             receiver, selector, video, time
         );
     }
-    double current = YTKACEDoubleMessage(receiver, @[@"currentVideoMediaTime"]);
-    double resolved = current > 0.0 ? current : time;
+    double resolved = YTKACECurrentVideoMediaTime(receiver, time);
     if (YTKACESponsorTimeUpdatesEnabled) {
         YTKACEEvaluateSponsorTime(receiver, resolved);
     }

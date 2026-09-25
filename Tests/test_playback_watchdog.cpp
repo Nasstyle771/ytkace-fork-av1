@@ -197,6 +197,30 @@ static void testHeartbeatIsNotAFault() {
     expect(dog.attemptsInWindow(300.0) == 0, "no recovery attempted");
 }
 
+static void testRateAdjustment() {
+    begin("rate adjustment scales progress tracking correctly");
+    PlaybackWatchdog dog = started();
+    dog.setPlaybackRate(0.5);
+    expect(dog.playbackRate() == 0.5, "rate set to 0.5");
+    // At 0.5x rate, a 0.15s advance is > (0.25 * 0.5 = 0.125), so it counts as progress
+    dog.handle(WatchdogEvent::StalledState, 10.0);
+    expect(dog.state() == WatchdogState::Suspect, "suspect armed");
+    WatchdogOutcome outcome = dog.handle(WatchdogEvent::ProgressObserved, 10.5, 0.15);
+    expect(dog.state() == WatchdogState::Watching, "progress cleared suspect state");
+    expect(outcome.cancelTimers, "timers cancelled");
+}
+
+static void testNetworkDropout() {
+    begin("network dropout error triggers suspicion and progresses through recovery ladder");
+    PlaybackWatchdog dog = started();
+    WatchdogOutcome suspect = dog.handle(WatchdogEvent::ErrorReported, 10.0);
+    expect(dog.state() == WatchdogState::Suspect, "error enters Suspect");
+    expect(suspect.armTimerIn > 1.0, "confirm timer set");
+    WatchdogOutcome fired = dog.handle(WatchdogEvent::TimerFired, 11.2);
+    expect(dog.state() == WatchdogState::Recovering, "recovering after confirm");
+    expectAction(fired.action, WatchdogAction::Resume, "first rung Resume");
+}
+
 int main() {
     std::printf("PlaybackWatchdog\n");
     testStall();
@@ -210,6 +234,8 @@ int main() {
     testFlap();
     testCooldownIgnoresFaults();
     testHeartbeatIsNotAFault();
+    testRateAdjustment();
+    testNetworkDropout();
     if (failureCount == 0) {
         std::printf("all tests passed\n");
         return 0;

@@ -129,6 +129,7 @@ static NSArray<YTKACESubtitleCue *> *YTKACEReadEmbeddedSubtitles(NSURL *mediaURL
 
     NSMutableArray<YTKACESubtitleCue *> *cues = [NSMutableArray array];
     CMSampleBufferRef sample = NULL;
+    uint8_t stackBuffer[1024];
     while ((sample = [output copyNextSampleBuffer]) != NULL) {
         const CMTime start = CMSampleBufferGetPresentationTimeStamp(sample);
         const CMTime duration = CMSampleBufferGetDuration(sample);
@@ -136,7 +137,7 @@ static NSArray<YTKACESubtitleCue *> *YTKACEReadEmbeddedSubtitles(NSURL *mediaURL
         const size_t length = block != NULL
             ? CMBlockBufferGetDataLength(block) : 0;
         if (block != NULL && length > 2) {
-            uint8_t *bytes = (uint8_t *)malloc(length);
+            uint8_t *bytes = length <= sizeof(stackBuffer) ? stackBuffer : (uint8_t *)malloc(length);
             if (bytes != NULL) {
                 if (CMBlockBufferCopyDataBytes(block, 0, length, bytes) ==
                         kCMBlockBufferNoErr) {
@@ -156,12 +157,48 @@ static NSArray<YTKACESubtitleCue *> *YTKACEReadEmbeddedSubtitles(NSURL *mediaURL
                         }
                     }
                 }
-                free(bytes);
+                if (bytes != stackBuffer) {
+                    free(bytes);
+                }
             }
         }
         CFRelease(sample);
     }
     return cues;
+}
+
+static NSCache<NSURL *, NSArray<YTKACESubtitleCue *> *> *YTKACESubtitleCache(void) {
+    static NSCache<NSURL *, NSArray<YTKACESubtitleCue *> *> *cache;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        cache = [NSCache new];
+        cache.countLimit = 32;
+    });
+    return cache;
+}
+
+static void YTKACELoadSubtitlesAsync(NSURL *mediaURL, void (^completion)(NSArray<YTKACESubtitleCue *> *cues)) {
+    if (mediaURL == nil) {
+        if (completion) completion(@[]);
+        return;
+    }
+    NSArray<YTKACESubtitleCue *> *cached = [YTKACESubtitleCache() objectForKey:mediaURL];
+    if (cached != nil) {
+        if (completion) completion(cached);
+        return;
+    }
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        NSArray<YTKACESubtitleCue *> *loaded = YTKACEReadSubtitles(mediaURL);
+        if (loaded.count == 0) {
+            loaded = YTKACEReadEmbeddedSubtitles(mediaURL);
+        }
+        if (loaded != nil) {
+            [YTKACESubtitleCache() setObject:loaded forKey:mediaURL];
+        }
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (completion) completion(loaded ?: @[]);
+        });
+    });
 }
 
 @interface YTKACEDownloadPlaybackSession ()
@@ -1061,12 +1098,16 @@ static void YTKACEStoreCompleted(NSURL *URL, NSTimeInterval duration,
     self.titleLabel.text = currentURL.lastPathComponent.stringByDeletingPathExtension;
     if (![self.subtitleMediaPath isEqualToString:currentURL.path]) {
         self.subtitleMediaPath = currentURL.path;
-        NSArray<YTKACESubtitleCue *> *loaded =
-            currentURL == nil ? @[] : YTKACEReadSubtitles(currentURL);
-        if (loaded.count == 0 && currentURL != nil) {
-            loaded = YTKACEReadEmbeddedSubtitles(currentURL);
-        }
-        self.subtitleCues = loaded;
+        self.subtitleCues = @[];
+        self.captionButton.hidden = YES;
+        NSString *targetPath = currentURL.path;
+        __weak YTKACEDownloadPlayerController *weakSelf = self;
+        YTKACELoadSubtitlesAsync(currentURL, ^(NSArray<YTKACESubtitleCue *> *cues) {
+            YTKACEDownloadPlayerController *strongSelf = weakSelf;
+            if (strongSelf == nil || ![strongSelf.subtitleMediaPath isEqualToString:targetPath]) return;
+            strongSelf.subtitleCues = cues;
+            strongSelf.captionButton.hidden = cues.count == 0;
+        });
     }
     NSTimeInterval elapsed = CMTimeGetSeconds(self.session.player.currentTime);
     NSTimeInterval duration = CMTimeGetSeconds(self.session.player.currentItem.duration);

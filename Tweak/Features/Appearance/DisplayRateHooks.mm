@@ -18,8 +18,12 @@ static IMP OriginalAnimationSetPreferredFrameRateRange;
 static IMP OriginalAVPlayerPlay;
 static IMP OriginalAVPlayerPause;
 static IMP OriginalAVPlayerSetRate;
+static IMP OriginalAVPlayerReplaceCurrentItem;
+static IMP OriginalAppSendEvent;
+static IMP OriginalScrollViewSetContentOffset;
 
 static BOOL s_videoPlaybackActive = NO;
+static CFTimeInterval s_lastTouchInteraction = 0.0;
 
 void YTKACESetVideoPlaybackActive(BOOL active) {
     s_videoPlaybackActive = active;
@@ -27,6 +31,32 @@ void YTKACESetVideoPlaybackActive(BOOL active) {
 
 BOOL YTKACEIsVideoPlaybackActive(void) {
     return s_videoPlaybackActive;
+}
+
+void YTKACENoteTouchInteraction(void) {
+    s_lastTouchInteraction = CACurrentMediaTime();
+}
+
+static inline BOOL YTKACEIsTouchOrScrollActive(void) {
+    return (CACurrentMediaTime() - s_lastTouchInteraction) < 0.45;
+}
+
+static void YTKACEAppSendEvent(UIApplication *receiver, SEL selector, UIEvent *event) {
+    if (OriginalAppSendEvent != NULL) {
+        ((void (*)(id, SEL, id))OriginalAppSendEvent)(receiver, selector, event);
+    }
+    if (event.type == UIEventTypeTouches) {
+        s_lastTouchInteraction = CACurrentMediaTime();
+    }
+}
+
+static void YTKACEScrollViewSetContentOffset(UIScrollView *receiver, SEL selector, CGPoint offset) {
+    if (OriginalScrollViewSetContentOffset != NULL) {
+        ((void (*)(id, SEL, CGPoint))OriginalScrollViewSetContentOffset)(receiver, selector, offset);
+    }
+    if (receiver.isDragging || receiver.isDecelerating || receiver.isTracking) {
+        s_lastTouchInteraction = CACurrentMediaTime();
+    }
 }
 
 static void YTKACEAVPlayerPlay(AVPlayer *receiver, SEL selector) {
@@ -47,6 +77,15 @@ static void YTKACEAVPlayerSetRate(AVPlayer *receiver, SEL selector, float rate) 
     s_videoPlaybackActive = (rate > 0.01f);
     if (OriginalAVPlayerSetRate != NULL) {
         ((void (*)(id, SEL, float))OriginalAVPlayerSetRate)(receiver, selector, rate);
+    }
+}
+
+static void YTKACEAVPlayerReplaceCurrentItem(AVPlayer *receiver, SEL selector, AVPlayerItem *item) {
+    if (item == nil) {
+        s_videoPlaybackActive = NO;
+    }
+    if (OriginalAVPlayerReplaceCurrentItem != NULL) {
+        ((void (*)(id, SEL, id))OriginalAVPlayerReplaceCurrentItem)(receiver, selector, item);
     }
 }
 
@@ -80,14 +119,18 @@ static void YTKACEDisplayLinkSetPreferredFrameRateRange(CADisplayLink *receiver,
     if (YTKACE120HzActive()) {
         BOOL preserveVideo = YTKACEFeatureEnabled(YTKACEPreserveVideoFPSKey);
         if (preserveVideo && s_videoPlaybackActive && range.maximum <= 60.0f && range.maximum >= 23.0f) {
-            // Keep video frame pacing unchanged to avoid judder
+            // Keep exact video frame pacing (24/30/60fps) unchanged to avoid micro-stutter/judder
         } else if (range.maximum >= 59.0f || range.preferred >= 59.0f) {
             id modeVal = YTKACEPreferenceObject(YTKACE120HzModeKey);
             NSInteger mode = [modeVal respondsToSelector:@selector(integerValue)] ? [modeVal integerValue] : 0;
-            if (mode == 1) { // Locked 120
+            if (mode == 1) { // Locked 120Hz
                 range = CAFrameRateRangeMake(120.0f, 120.0f, 120.0f);
-            } else { // Adaptive 120
-                range = CAFrameRateRangeMake(80.0f, 120.0f, 120.0f);
+            } else { // Dynamic Adaptive 80-120Hz scaling
+                if (YTKACEIsTouchOrScrollActive()) {
+                    range = CAFrameRateRangeMake(80.0f, 120.0f, 120.0f);
+                } else {
+                    range = CAFrameRateRangeMake(60.0f, 120.0f, 120.0f);
+                }
             }
         }
     }
@@ -103,7 +146,7 @@ static void YTKACEDisplayLinkSetPreferredFramesPerSecond(CADisplayLink *receiver
     if (YTKACE120HzActive()) {
         BOOL preserveVideo = YTKACEFeatureEnabled(YTKACEPreserveVideoFPSKey);
         if (preserveVideo && s_videoPlaybackActive && fps <= 60 && fps >= 24) {
-            // Keep video fps
+            // Keep exact video fps to preserve cadence
         } else if (fps >= 59) {
             fps = 120;
         }
@@ -119,7 +162,15 @@ static void YTKACELayerSetPreferredFrameRateRange(CALayer *receiver,
                                                  CAFrameRateRange range) {
     if (YTKACE120HzActive()) {
         if (range.maximum >= 59.0f || range.preferred >= 59.0f) {
-            range = CAFrameRateRangeMake(80.0f, 120.0f, 120.0f);
+            id modeVal = YTKACEPreferenceObject(YTKACE120HzModeKey);
+            NSInteger mode = [modeVal respondsToSelector:@selector(integerValue)] ? [modeVal integerValue] : 0;
+            if (mode == 1) {
+                range = CAFrameRateRangeMake(120.0f, 120.0f, 120.0f);
+            } else {
+                range = YTKACEIsTouchOrScrollActive()
+                    ? CAFrameRateRangeMake(80.0f, 120.0f, 120.0f)
+                    : CAFrameRateRangeMake(60.0f, 120.0f, 120.0f);
+            }
         }
     }
     if (OriginalLayerSetPreferredFrameRateRange != NULL) {
@@ -133,7 +184,15 @@ static void YTKACEAnimationSetPreferredFrameRateRange(CAAnimation *receiver,
                                                      CAFrameRateRange range) {
     if (YTKACE120HzActive()) {
         if (range.maximum >= 59.0f || range.preferred >= 59.0f) {
-            range = CAFrameRateRangeMake(80.0f, 120.0f, 120.0f);
+            id modeVal = YTKACEPreferenceObject(YTKACE120HzModeKey);
+            NSInteger mode = [modeVal respondsToSelector:@selector(integerValue)] ? [modeVal integerValue] : 0;
+            if (mode == 1) {
+                range = CAFrameRateRangeMake(120.0f, 120.0f, 120.0f);
+            } else {
+                range = YTKACEIsTouchOrScrollActive()
+                    ? CAFrameRateRangeMake(80.0f, 120.0f, 120.0f)
+                    : CAFrameRateRangeMake(60.0f, 120.0f, 120.0f);
+            }
         }
     }
     if (OriginalAnimationSetPreferredFrameRateRange != NULL) {
@@ -152,16 +211,23 @@ static struct YTKACEASRangeTuningParams YTKACECollectionNodeRangeTuning(id recei
     (void)selector;
     struct YTKACEASRangeTuningParams params;
     BOOL boost = YTKACEFeatureEnabled(YTKACESmoothScrollBoostKey);
-    // rangeType 0 = FetchData (network download) -> 4.0 screens ahead
+    // rangeType 0 = FetchData (network download) -> 4.5 screens ahead
     // rangeType 1 = Display (render bitmaps/layers) -> 2.5 screens ahead
     if (rangeType == 0) {
-        params.leadingBufferScreenfuls = boost ? 4.0f : 2.0f;
+        params.leadingBufferScreenfuls = boost ? 4.5f : 2.0f;
         params.trailingBufferScreenfuls = 1.0f;
     } else {
         params.leadingBufferScreenfuls = boost ? 2.5f : 1.5f;
         params.trailingBufferScreenfuls = 0.5f;
     }
     return params;
+}
+
+static struct YTKACEASRangeTuningParams YTKACECollectionNodeRangeTuningMode(id receiver, SEL selector, NSInteger rangeMode, NSInteger rangeType) {
+    (void)receiver;
+    (void)selector;
+    (void)rangeMode;
+    return YTKACECollectionNodeRangeTuning(receiver, selector, rangeType);
 }
 
 static CGFloat YTKACECollectionViewLeadingScreens(id receiver, SEL selector) {
@@ -178,6 +244,27 @@ void YTKACEInstallDisplayRateHooks(void) {
                                                            diskCapacity:1024 * 1024 * 1024
                                                                diskPath:@"ytkace_image_cache"];
         [NSURLCache setSharedURLCache:shared];
+
+        // Automatic AVPlayer state observation
+        NSNotificationCenter *nc = NSNotificationCenter.defaultCenter;
+        [nc addObserverForName:AVPlayerItemDidPlayToEndTimeNotification
+                        object:nil
+                         queue:NSOperationQueue.mainQueue
+                    usingBlock:^(__unused NSNotification *note) {
+            s_videoPlaybackActive = NO;
+        }];
+        [nc addObserverForName:AVPlayerItemFailedToPlayToEndTimeNotification
+                        object:nil
+                         queue:NSOperationQueue.mainQueue
+                    usingBlock:^(__unused NSNotification *note) {
+            s_videoPlaybackActive = NO;
+        }];
+        [nc addObserverForName:AVPlayerItemPlaybackStalledNotification
+                        object:nil
+                         queue:NSOperationQueue.mainQueue
+                    usingBlock:^(__unused NSNotification *note) {
+            s_videoPlaybackActive = NO;
+        }];
     });
 
     // ProMotion 120Hz Info.plist hooks
@@ -210,10 +297,22 @@ void YTKACEInstallDisplayRateHooks(void) {
                               (IMP)YTKACEAnimationSetPreferredFrameRateRange,
                               &OriginalAnimationSetPreferredFrameRateRange);
 
+    // Touch & scroll activity tracking for dynamic 80-120Hz scaling
+    YTKACEInstallInstanceHook(@"UIApplication",
+                              @"sendEvent:",
+                              (IMP)YTKACEAppSendEvent,
+                              &OriginalAppSendEvent);
+    YTKACEInstallInstanceHook(@"UIScrollView",
+                              @"setContentOffset:",
+                              (IMP)YTKACEScrollViewSetContentOffset,
+                              &OriginalScrollViewSetContentOffset);
+
     // AVPlayer video playback status hooks
     YTKACEInstallInstanceHook(@"AVPlayer", @"play", (IMP)YTKACEAVPlayerPlay, &OriginalAVPlayerPlay);
     YTKACEInstallInstanceHook(@"AVPlayer", @"pause", (IMP)YTKACEAVPlayerPause, &OriginalAVPlayerPause);
     YTKACEInstallInstanceHook(@"AVPlayer", @"setRate:", (IMP)YTKACEAVPlayerSetRate, &OriginalAVPlayerSetRate);
+    YTKACEInstallInstanceHook(@"AVPlayer", @"replaceCurrentItemWithPlayerItem:",
+                              (IMP)YTKACEAVPlayerReplaceCurrentItem, &OriginalAVPlayerReplaceCurrentItem);
 
     // Texture / AsyncDisplayKit Range Tuning for buttery smooth feed scrolling
     IMP originalRangeTuning = NULL;
@@ -221,6 +320,18 @@ void YTKACEInstallDisplayRateHooks(void) {
                               @"rangeTuningParametersForRangeType:",
                               (IMP)YTKACECollectionNodeRangeTuning,
                               &originalRangeTuning);
+
+    IMP originalRangeTuningMode = NULL;
+    YTKACEInstallInstanceHook(@"ASCollectionNode",
+                              @"rangeTuningParametersForRangeMode:rangeType:",
+                              (IMP)YTKACECollectionNodeRangeTuningMode,
+                              &originalRangeTuningMode);
+
+    IMP originalTableRangeTuning = NULL;
+    YTKACEInstallInstanceHook(@"ASTableNode",
+                              @"rangeTuningParametersForRangeType:",
+                              (IMP)YTKACECollectionNodeRangeTuning,
+                              &originalTableRangeTuning);
 
     IMP originalLeadingScreens = NULL;
     YTKACEInstallInstanceHook(@"ASCollectionView",

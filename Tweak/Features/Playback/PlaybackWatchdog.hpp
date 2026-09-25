@@ -62,6 +62,9 @@ public:
     WatchdogState state() const;
     int attemptsInWindow(double now) const;
 
+    void setPlaybackRate(double rate);
+    double playbackRate() const;
+
 private:
     WatchdogOutcome beginSuspicion(double now);
     WatchdogOutcome advanceRecovery(double now);
@@ -72,6 +75,7 @@ private:
     WatchdogConfig config_;
     WatchdogState state_ = WatchdogState::Idle;
     bool live_ = false;
+    double rate_ = 1.0;
     int incidentAttempts_ = 0;
     double lastPosition_ = -1.0;
     double positionAtSuspicion_ = -1.0;

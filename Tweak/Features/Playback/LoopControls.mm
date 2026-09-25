@@ -91,15 +91,33 @@ static BOOL YTKACELoopActive(void) {
 }
 
 - (void)playerFinished:(NSNotification *)notification {
-    if (!YTKACELoopActive() || notification.object != self.player.currentItem) {
+    if (!YTKACELoopActive()) {
         return;
     }
-    [self.player seekToTime:kCMTimeZero
-            toleranceBefore:kCMTimeZero
-             toleranceAfter:kCMTimeZero
-          completionHandler:^(__unused BOOL finished) {
-              [self.player play];
-          }];
+    AVPlayer *player = self.player ?: [self activePlayer];
+    if (notification.object != nil && [notification.object isKindOfClass:AVPlayerItem.class]) {
+        AVPlayerItem *item = (AVPlayerItem *)notification.object;
+        if (player.currentItem != item) {
+            player = [self activePlayer];
+        }
+    }
+    if (player == nil) return;
+
+    CMTime keyframeTolerance = CMTimeMake(1, 10); // 0.1s nearest keyframe
+    [player seekToTime:kCMTimeZero
+       toleranceBefore:keyframeTolerance
+        toleranceAfter:keyframeTolerance
+     completionHandler:^(BOOL finished) {
+         if (finished) {
+             [player play];
+         }
+     }];
+
+    id controller = [self autonavController];
+    SEL replaySel = NSSelectorFromString(@"replay");
+    if ([controller respondsToSelector:replaySel]) {
+        ((void (*)(id, SEL))objc_msgSend)(controller, replaySel);
+    }
 }
 
 - (void)toggleLoop {

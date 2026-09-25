@@ -36,20 +36,42 @@ static UIViewController *YTKACEAvatarPresenter(UIView *view) {
     return controller;
 }
 
+static inline BOOL YTKACEStringHasAvatarToken(NSString *str) {
+    if (str == nil || str.length == 0) return NO;
+    return ([str rangeOfString:@"avatar" options:NSCaseInsensitiveSearch].location != NSNotFound ||
+            [str rangeOfString:@"profile" options:NSCaseInsensitiveSearch].location != NSNotFound ||
+            [str rangeOfString:@"account" options:NSCaseInsensitiveSearch].location != NSNotFound ||
+            [str rangeOfString:@"channelreel" options:NSCaseInsensitiveSearch].location != NSNotFound ||
+            [str rangeOfString:@"reelround" options:NSCaseInsensitiveSearch].location != NSNotFound);
+}
+
 static BOOL YTKACEAvatarToken(UIView *view) {
     UIView *candidate = view;
     for (NSUInteger depth = 0; candidate != nil && depth < 7; depth++) {
-        NSString *token = [NSString stringWithFormat:@"%@ %@ %@",
-            NSStringFromClass(candidate.class) ?: @"",
-            candidate.accessibilityIdentifier ?: @"",
-            candidate.accessibilityLabel ?: @""].lowercaseString;
-        if ([token containsString:@"ytkace"]) return NO;
-        if ([token containsString:@"avatar"] ||
-            [token containsString:@"profile"] ||
-            [token containsString:@"account"] ||
-            [token containsString:@"channelreel"] ||
-            [token containsString:@"reelround"]) {
-            return YES;
+        NSString *ident = candidate.accessibilityIdentifier;
+        if (ident != nil) {
+            if ([ident rangeOfString:@"ytkace" options:NSCaseInsensitiveSearch].location != NSNotFound) {
+                return NO;
+            }
+            if (YTKACEStringHasAvatarToken(ident)) return YES;
+        }
+        NSString *label = candidate.accessibilityLabel;
+        if (label != nil) {
+            if ([label rangeOfString:@"ytkace" options:NSCaseInsensitiveSearch].location != NSNotFound) {
+                return NO;
+            }
+            if (YTKACEStringHasAvatarToken(label)) return YES;
+        }
+        const char *clsName = class_getName(candidate.class);
+        if (clsName != NULL) {
+            if (strcasestr(clsName, "ytkace") != NULL) return NO;
+            if (strcasestr(clsName, "avatar") != NULL ||
+                strcasestr(clsName, "profile") != NULL ||
+                strcasestr(clsName, "account") != NULL ||
+                strcasestr(clsName, "channelreel") != NULL ||
+                strcasestr(clsName, "reelround") != NULL) {
+                return YES;
+            }
         }
         candidate = candidate.superview;
     }
@@ -527,7 +549,14 @@ static const void *YTKACEAvatarViewGestureAssociation =
 
 void YTKACEProfileConsiderDisplayView(UIView *view, id node) {
     if (view == nil || !YTKACEFeatureEnabled(@"YTKACE.Preference.Profiles.Preview")) return;
-    if (![[view description] containsString:@"ELMImageNode-View"]) return;
+    if (node != nil) {
+        const char *nodeCls = class_getName(object_getClass(node));
+        if (nodeCls == NULL || strcasestr(nodeCls, "ImageNode") == NULL) {
+            if (![[view description] containsString:@"ELMImageNode-View"]) return;
+        }
+    } else {
+        if (![[view description] containsString:@"ELMImageNode-View"]) return;
+    }
     if (node != nil) {
         objc_setAssociatedObject(view, YTKACEAvatarNodeAssociation, node,
                                  OBJC_ASSOCIATION_RETAIN_NONATOMIC);

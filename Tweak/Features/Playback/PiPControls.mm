@@ -21,7 +21,7 @@
 @property(nonatomic, strong) AVPlayerLayer *playerLayer;
 @property(nonatomic, strong) UIView *playerView;
 @property(nonatomic, strong) UIView *loadingView;
-@property(nonatomic, strong) id youtubePlayer;
+@property(nonatomic, weak) id youtubePlayer;
 @property(nonatomic, assign) BOOL observingItem;
 @property(nonatomic, assign) BOOL polling;
 - (void)togglePiP;
@@ -238,12 +238,17 @@
 - (void)clearPlayer {
     self.polling = NO;
     [self stopObservingItem];
+    if (self.controller != nil) {
+        self.controller.delegate = nil;
+        self.controller = nil;
+    }
     [self.player pause];
     [self.playerView removeFromSuperview];
     self.playerView = nil;
     self.playerLayer = nil;
     self.playerItem = nil;
     self.player = nil;
+    self.youtubePlayer = nil;
 }
 
 - (void)togglePiP {
@@ -258,6 +263,34 @@
         [self showError:@"PiP is not supported on this device."];
         return;
     }
+
+    // 1. Try native YouTube PiP responder first (zero audio interruption, instant handoff)
+    if ([self askResponderForPiP]) {
+        return;
+    }
+
+    // 2. Try active player layer directly from the existing player (seamless, zero secondary stream fetch)
+    AVPlayerLayer *activeLayer = [self activePlayerLayer];
+    if (activeLayer != nil) {
+        if (self.controller != nil && self.controller.playerLayer != activeLayer) {
+            self.controller.delegate = nil;
+            self.controller = nil;
+        }
+        if (self.controller == nil) {
+            self.controller = [[AVPictureInPictureController alloc] initWithPlayerLayer:activeLayer];
+            self.controller.delegate = self;
+        }
+        if (self.controller.isPictureInPicturePossible) {
+            [self.controller startPictureInPicture];
+            return;
+        } else {
+            self.polling = YES;
+            [self startPiPWithAttempts:10];
+            return;
+        }
+    }
+
+    // 3. Fallback: Resolve PiP stream option if no active layer is directly accessible
     [self showLoading];
     [self resumeYouTubePlayer];
     [self clearPlayer];
@@ -300,15 +333,6 @@
         self.polling = YES;
         [self startPiPWithAttempts:10];
     } else {
-        AVPlayerLayer *activeLayer = [self activePlayerLayer];
-        if (activeLayer != nil) {
-            self.controller = [[AVPictureInPictureController alloc]
-                initWithPlayerLayer:activeLayer];
-            self.controller.delegate = self;
-            self.polling = YES;
-            [self startPiPWithAttempts:10];
-            return;
-        }
         [self showError:@"No playable video stream is available."];
         return;
     }

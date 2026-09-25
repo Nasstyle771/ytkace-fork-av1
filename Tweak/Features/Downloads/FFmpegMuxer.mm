@@ -35,8 +35,11 @@ static NSError *YTKACEFFmpegError(int code, NSString *stage) {
 
 static int YTKACEOpenInput(NSURL *URL, enum YTKACEFFmpegMediaType type,
                            AVFormatContext **context, int *streamIndex) {
+    AVDictionary *inputOptions = NULL;
+    av_dict_set_int(&inputOptions, "buffer_size", 256 * 1024, 0);
     int result = avformat_open_input(context, URL.fileSystemRepresentation,
-        NULL, NULL);
+        NULL, &inputOptions);
+    av_dict_free(&inputOptions);
     if (result < 0) return result;
     result = avformat_find_stream_info(*context, NULL);
     if (result < 0) return result;
@@ -94,40 +97,85 @@ static NSError *YTKACERemux(NSURL *videoURL, NSURL *audioURL,
     result = YTKACEOpenInput(audioURL, AVMEDIA_TYPE_AUDIO, &audio, &audioIndex);
     stage = @"Open audio";
     if (result < 0) goto cleanup;
-    result = avformat_alloc_output_context2(&output, NULL, "mp4",
-        outputURL.fileSystemRepresentation);
-    stage = @"Create output";
-    if (result < 0 || output == NULL) {
-        if (result >= 0) result = AVERROR_UNKNOWN;
-        goto cleanup;
-    }
-    videoInput = video->streams[videoIndex];
-    audioInput = audio->streams[audioIndex];
-    videoOutput = avformat_new_stream(output, NULL);
-    audioOutput = avformat_new_stream(output, NULL);
-    stage = @"Create tracks";
-    if (videoOutput == NULL || audioOutput == NULL) {
-        result = AVERROR(ENOMEM);
-        goto cleanup;
-    }
-    result = avcodec_parameters_copy(videoOutput->codecpar, videoInput->codecpar);
-    if (result < 0) goto cleanup;
-    result = avcodec_parameters_copy(audioOutput->codecpar, audioInput->codecpar);
-    if (result < 0) goto cleanup;
-    videoOutput->codecpar->codec_tag = 0;
-    audioOutput->codecpar->codec_tag = 0;
-    videoOutput->time_base = videoInput->time_base;
-    audioOutput->time_base = audioInput->time_base;
-    if ((output->oformat->flags & AVFMT_NOFILE) == 0) {
-        result = avio_open(&output->pb, outputURL.fileSystemRepresentation,
-            AVIO_FLAG_WRITE);
-        stage = @"Open output";
+
+    {
+        NSString *ext = outputURL.pathExtension.lowercaseString;
+        const char *formatName = "mp4";
+        BOOL isMKV = NO;
+        if ([ext isEqualToString:@"mkv"]) {
+            formatName = "matroska";
+            isMKV = YES;
+        } else if ([ext isEqualToString:@"webm"]) {
+            formatName = "webm";
+            isMKV = YES;
+        }
+        result = avformat_alloc_output_context2(&output, NULL, formatName,
+            outputURL.fileSystemRepresentation);
+        stage = @"Create output";
+        if (result < 0 || output == NULL) {
+            if (result >= 0) result = AVERROR_UNKNOWN;
+            goto cleanup;
+        }
+        videoInput = video->streams[videoIndex];
+        audioInput = audio->streams[audioIndex];
+        videoOutput = avformat_new_stream(output, NULL);
+        audioOutput = avformat_new_stream(output, NULL);
+        stage = @"Create tracks";
+        if (videoOutput == NULL || audioOutput == NULL) {
+            result = AVERROR(ENOMEM);
+            goto cleanup;
+        }
+        result = avcodec_parameters_copy(videoOutput->codecpar, videoInput->codecpar);
+        if (result < 0) goto cleanup;
+        result = avcodec_parameters_copy(audioOutput->codecpar, audioInput->codecpar);
+        if (result < 0) goto cleanup;
+
+        // Proper fourcc tags for MP4/MKV packaging to ensure ultra-fast stream copy without re-encoding
+        if (!isMKV) {
+            if (videoInput->codecpar->codec_id == AV_CODEC_ID_AV1) {
+                videoOutput->codecpar->codec_tag = MKTAG('a', 'v', '0', '1');
+            } else if (videoInput->codecpar->codec_id == AV_CODEC_ID_VP9) {
+                videoOutput->codecpar->codec_tag = MKTAG('v', 'p', '0', '9');
+            } else if (videoInput->codecpar->codec_id == AV_CODEC_ID_H264) {
+                videoOutput->codecpar->codec_tag = MKTAG('a', 'v', 'c', '1');
+            } else if (videoInput->codecpar->codec_id == AV_CODEC_ID_HEVC) {
+                videoOutput->codecpar->codec_tag = MKTAG('h', 'v', 'c', '1');
+            } else {
+                videoOutput->codecpar->codec_tag = 0;
+            }
+
+            if (audioInput->codecpar->codec_id == AV_CODEC_ID_OPUS) {
+                audioOutput->codecpar->codec_tag = MKTAG('O', 'p', 'u', 's');
+            } else if (audioInput->codecpar->codec_id == AV_CODEC_ID_AAC) {
+                audioOutput->codecpar->codec_tag = MKTAG('m', 'p', '4', 'a');
+            } else {
+                audioOutput->codecpar->codec_tag = 0;
+            }
+        } else {
+            videoOutput->codecpar->codec_tag = 0;
+            audioOutput->codecpar->codec_tag = 0;
+        }
+
+        videoOutput->time_base = videoInput->time_base;
+        audioOutput->time_base = audioInput->time_base;
+        if ((output->oformat->flags & AVFMT_NOFILE) == 0) {
+            AVDictionary *ioOptions = NULL;
+            av_dict_set_int(&ioOptions, "buffer_size", 256 * 1024, 0); // 256KB AVIO buffer
+            result = avio_open2(&output->pb, outputURL.fileSystemRepresentation,
+                AVIO_FLAG_WRITE, NULL, &ioOptions);
+            av_dict_free(&ioOptions);
+            stage = @"Open output";
+            if (result < 0) goto cleanup;
+        }
+        if (!isMKV) {
+            av_dict_set(&options, "movflags", "+faststart", 0);
+        }
+        av_dict_set(&options, "strict", "experimental", 0);
+        output->strict_std_compliance = FF_COMPLIANCE_EXPERIMENTAL;
+        result = avformat_write_header(output, &options);
+        stage = @"Write header";
         if (result < 0) goto cleanup;
     }
-    av_dict_set(&options, "movflags", "+faststart", 0);
-    result = avformat_write_header(output, &options);
-    stage = @"Write header";
-    if (result < 0) goto cleanup;
 
     videoPacket = av_packet_alloc();
     audioPacket = av_packet_alloc();
@@ -183,34 +231,69 @@ static NSError *YTKACERemuxAudio(NSURL *audioURL, NSURL *outputURL) {
     NSString *stage = @"Open audio";
     int result = YTKACEOpenInput(audioURL, AVMEDIA_TYPE_AUDIO, &audio, &audioIndex);
     if (result < 0) goto cleanup;
-    result = avformat_alloc_output_context2(&output, NULL, "mp4",
-        outputURL.fileSystemRepresentation);
-    stage = @"Create output";
-    if (result < 0 || output == NULL) {
-        if (result >= 0) result = AVERROR_UNKNOWN;
-        goto cleanup;
-    }
-    audioInput = audio->streams[audioIndex];
-    audioOutput = avformat_new_stream(output, NULL);
-    stage = @"Create track";
-    if (audioOutput == NULL) {
-        result = AVERROR(ENOMEM);
-        goto cleanup;
-    }
-    result = avcodec_parameters_copy(audioOutput->codecpar, audioInput->codecpar);
-    if (result < 0) goto cleanup;
-    audioOutput->codecpar->codec_tag = 0;
-    audioOutput->time_base = audioInput->time_base;
-    if ((output->oformat->flags & AVFMT_NOFILE) == 0) {
-        result = avio_open(&output->pb, outputURL.fileSystemRepresentation,
-            AVIO_FLAG_WRITE);
-        stage = @"Open output";
+
+    {
+        NSString *ext = outputURL.pathExtension.lowercaseString;
+        const char *formatName = "mp4";
+        BOOL isMKV = NO;
+        if ([ext isEqualToString:@"mkv"]) {
+            formatName = "matroska";
+            isMKV = YES;
+        } else if ([ext isEqualToString:@"webm"]) {
+            formatName = "webm";
+            isMKV = YES;
+        } else if ([ext isEqualToString:@"opus"] || [ext isEqualToString:@"ogg"]) {
+            formatName = "ogg";
+            isMKV = YES;
+        }
+        result = avformat_alloc_output_context2(&output, NULL, formatName,
+            outputURL.fileSystemRepresentation);
+        stage = @"Create output";
+        if (result < 0 || output == NULL) {
+            if (result >= 0) result = AVERROR_UNKNOWN;
+            goto cleanup;
+        }
+        audioInput = audio->streams[audioIndex];
+        audioOutput = avformat_new_stream(output, NULL);
+        stage = @"Create track";
+        if (audioOutput == NULL) {
+            result = AVERROR(ENOMEM);
+            goto cleanup;
+        }
+        result = avcodec_parameters_copy(audioOutput->codecpar, audioInput->codecpar);
+        if (result < 0) goto cleanup;
+
+        if (!isMKV) {
+            if (audioInput->codecpar->codec_id == AV_CODEC_ID_OPUS) {
+                audioOutput->codecpar->codec_tag = MKTAG('O', 'p', 'u', 's');
+            } else if (audioInput->codecpar->codec_id == AV_CODEC_ID_AAC) {
+                audioOutput->codecpar->codec_tag = MKTAG('m', 'p', '4', 'a');
+            } else {
+                audioOutput->codecpar->codec_tag = 0;
+            }
+        } else {
+            audioOutput->codecpar->codec_tag = 0;
+        }
+
+        audioOutput->time_base = audioInput->time_base;
+        if ((output->oformat->flags & AVFMT_NOFILE) == 0) {
+            AVDictionary *ioOptions = NULL;
+            av_dict_set_int(&ioOptions, "buffer_size", 256 * 1024, 0); // 256KB AVIO buffer
+            result = avio_open2(&output->pb, outputURL.fileSystemRepresentation,
+                AVIO_FLAG_WRITE, NULL, &ioOptions);
+            av_dict_free(&ioOptions);
+            stage = @"Open output";
+            if (result < 0) goto cleanup;
+        }
+        if (!isMKV) {
+            av_dict_set(&options, "movflags", "+faststart", 0);
+        }
+        av_dict_set(&options, "strict", "experimental", 0);
+        output->strict_std_compliance = FF_COMPLIANCE_EXPERIMENTAL;
+        result = avformat_write_header(output, &options);
+        stage = @"Write header";
         if (result < 0) goto cleanup;
     }
-    av_dict_set(&options, "movflags", "+faststart", 0);
-    result = avformat_write_header(output, &options);
-    stage = @"Write header";
-    if (result < 0) goto cleanup;
     packet = av_packet_alloc();
     if (packet == NULL) {
         result = AVERROR(ENOMEM);
@@ -313,6 +396,7 @@ static NSError *YTKACEAudioToVideo(NSURL *audioURL, NSData *artwork,
         encoder->time_base = (AVRational){1, 1};
         encoder->framerate = (AVRational){1, 1};
         encoder->bit_rate = 400000;
+        encoder->thread_count = (int)MIN(4, NSProcessInfo.processInfo.activeProcessorCount);
         if (output->oformat->flags & AVFMT_GLOBALHEADER) {
             encoder->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
         }
@@ -330,11 +414,15 @@ static NSError *YTKACEAudioToVideo(NSURL *audioURL, NSData *artwork,
         audioStream->codecpar->codec_tag = 0;
 
         if (!(output->oformat->flags & AVFMT_NOFILE)) {
-            if (avio_open(&output->pb, outputURL.path.UTF8String,
-                          AVIO_FLAG_WRITE) < 0) {
+            AVDictionary *ioOptions = NULL;
+            av_dict_set_int(&ioOptions, "buffer_size", 256 * 1024, 0); // 256KB AVIO buffer
+            if (avio_open2(&output->pb, outputURL.path.UTF8String,
+                           AVIO_FLAG_WRITE, NULL, &ioOptions) < 0) {
+                av_dict_free(&ioOptions);
                 error = YTKACEFFmpegError(-1, @"Could not create the file");
                 goto finish;
             }
+            av_dict_free(&ioOptions);
         }
         if (avformat_write_header(output, NULL) < 0) {
             error = YTKACEFFmpegError(-1, @"Could not create the file");
@@ -358,6 +446,7 @@ static NSError *YTKACEAudioToVideo(NSURL *audioURL, NSData *artwork,
                 avcodec_find_decoder(imageInput->streams[0]->codecpar->codec_id);
             if (imageCodec != NULL) {
                 imageDecoder = avcodec_alloc_context3(imageCodec);
+                imageDecoder->thread_count = (int)MIN(4, NSProcessInfo.processInfo.activeProcessorCount);
                 avcodec_parameters_to_context(imageDecoder,
                                               imageInput->streams[0]->codecpar);
                 if (avcodec_open2(imageDecoder, imageCodec, NULL) >= 0 &&
@@ -598,8 +687,28 @@ static BOOL YTKACEPatchTextSampleDescription(NSURL *URL,
                     if (source->codecpar->height > 0) {
                         videoHeight = source->codecpar->height;
                     }
+                    if (source->codecpar->codec_id == AV_CODEC_ID_AV1) {
+                        copy->codecpar->codec_tag = MKTAG('a', 'v', '0', '1');
+                    } else if (source->codecpar->codec_id == AV_CODEC_ID_VP9) {
+                        copy->codecpar->codec_tag = MKTAG('v', 'p', '0', '9');
+                    } else if (source->codecpar->codec_id == AV_CODEC_ID_H264) {
+                        copy->codecpar->codec_tag = MKTAG('a', 'v', 'c', '1');
+                    } else if (source->codecpar->codec_id == AV_CODEC_ID_HEVC) {
+                        copy->codecpar->codec_tag = MKTAG('h', 'v', 'c', '1');
+                    } else {
+                        copy->codecpar->codec_tag = 0;
+                    }
+                } else if (type == AVMEDIA_TYPE_AUDIO) {
+                    if (source->codecpar->codec_id == AV_CODEC_ID_OPUS) {
+                        copy->codecpar->codec_tag = MKTAG('O', 'p', 'u', 's');
+                    } else if (source->codecpar->codec_id == AV_CODEC_ID_AAC) {
+                        copy->codecpar->codec_tag = MKTAG('m', 'p', '4', 'a');
+                    } else {
+                        copy->codecpar->codec_tag = 0;
+                    }
+                } else {
+                    copy->codecpar->codec_tag = 0;
                 }
-                copy->codecpar->codec_tag = 0;
                 copy->time_base = source->time_base;
                 streamMap[index] = (int)(output->nb_streams - 1);
             }
@@ -665,15 +774,23 @@ static BOOL YTKACEPatchTextSampleDescription(NSURL *URL,
             textIndex = (int)(output->nb_streams - 1);
 
             if (!(output->oformat->flags & AVFMT_NOFILE)) {
-                status = avio_open(&output->pb,
-                                   outputURL.fileSystemRepresentation,
-                                   AVIO_FLAG_WRITE);
+                AVDictionary *ioOptions = NULL;
+                av_dict_set_int(&ioOptions, "buffer_size", 256 * 1024, 0); // 256KB AVIO buffer
+                status = avio_open2(&output->pb,
+                                    outputURL.fileSystemRepresentation,
+                                    AVIO_FLAG_WRITE, NULL, &ioOptions);
+                av_dict_free(&ioOptions);
                 if (status < 0) {
                     failure = YTKACEFFmpegError(status, @"subtitle avio");
                     break;
                 }
             }
-            status = avformat_write_header(output, NULL);
+            AVDictionary *muxOptions = NULL;
+            av_dict_set(&muxOptions, "movflags", "+faststart", 0);
+            av_dict_set(&muxOptions, "strict", "experimental", 0);
+            output->strict_std_compliance = FF_COMPLIANCE_EXPERIMENTAL;
+            status = avformat_write_header(output, &muxOptions);
+            av_dict_free(&muxOptions);
             if (status < 0) {
                 failure = YTKACEFFmpegError(status, @"subtitle header");
                 break;

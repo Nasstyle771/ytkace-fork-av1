@@ -29,8 +29,142 @@ NSString * const YTKACEPreserveVideoFPSKey = @"YTKACE.Preference.Display.Preserv
 NSString * const YTKACEPreferredCodecKey = @"YTKACE.Preference.Streaming.PreferredCodec";
 NSString * const YTKACEHighBitrateBufferBoostKey = @"YTKACE.Preference.Streaming.HighBitrateBufferBoost";
 
+#include <atomic>
+#include <os/lock.h>
+
+static std::atomic<bool> s_atomicMasterEnabled{true};
+static std::atomic<bool> s_atomicNoAds{true};
+static std::atomic<bool> s_atomicOLED{false};
+static std::atomic<bool> s_atomicDownload{false};
+static std::atomic<bool> s_atomicBackgroundPlayback{true};
+static std::atomic<bool> s_atomicPiP{false};
+static std::atomic<bool> s_atomicSpeed{false};
+static std::atomic<bool> s_atomicLoop{false};
+static std::atomic<bool> s_atomicSleepTimer{false};
+static std::atomic<bool> s_atomicSponsorBlock{false};
+static std::atomic<bool> s_atomic120HzEnabled{true};
+static std::atomic<bool> s_atomicSmoothScrollBoost{true};
+static std::atomic<bool> s_atomicPreserveVideoFPS{true};
+static std::atomic<bool> s_atomicBufferBoost{true};
+
+static std::atomic<NSInteger> s_atomicThemePreset{0};
+static std::atomic<NSInteger> s_atomicAccentPreset{0};
+static std::atomic<NSInteger> s_atomic120HzMode{0};
+static std::atomic<NSInteger> s_atomicPreferredCodec{1};
+static std::atomic<NSInteger> s_atomicDownloadPlacement{0};
+
+static NSString *s_themeCustomBgHex = @"#000000";
+static NSString *s_themeCustomSurfaceHex = @"#121212";
+static NSString *s_accentCustomHex = @"#FF0000";
+static os_unfair_lock s_prefLock = OS_UNFAIR_LOCK_INIT;
+static NSMutableDictionary<NSString *, id> *s_prefCache = nil;
+
+static os_unfair_lock s_colorCacheLock = OS_UNFAIR_LOCK_INIT;
+static UIColor *s_cachedThemeBg[16] = {nil};
+static UIColor *s_cachedThemeSurface[16] = {nil};
+static UIColor *s_cachedAccent[16] = {nil};
+
 static NSUserDefaults *YTKACEDefaults(void) {
     return NSUserDefaults.standardUserDefaults;
+}
+
+static void YTKACEUpdateAtomicCache(NSString *key, id value) {
+    if (key.length == 0) return;
+    BOOL bVal = [value respondsToSelector:@selector(boolValue)] ? [value boolValue] : NO;
+    NSInteger iVal = [value respondsToSelector:@selector(integerValue)] ? [value integerValue] : 0;
+
+    if ([key isEqualToString:YTKACEMasterEnabledKey]) {
+        s_atomicMasterEnabled.store(YES, std::memory_order_relaxed);
+    } else if ([key isEqualToString:YTKACENoAdsKey]) {
+        s_atomicNoAds.store(bVal, std::memory_order_relaxed);
+    } else if ([key isEqualToString:YTKACEOLEDKey]) {
+        s_atomicOLED.store(bVal, std::memory_order_relaxed);
+    } else if ([key isEqualToString:YTKACEDownloadKey]) {
+        s_atomicDownload.store(bVal, std::memory_order_relaxed);
+    } else if ([key isEqualToString:YTKACEBackgroundPlaybackKey]) {
+        s_atomicBackgroundPlayback.store(bVal, std::memory_order_relaxed);
+    } else if ([key isEqualToString:YTKACEPiPKey]) {
+        s_atomicPiP.store(bVal, std::memory_order_relaxed);
+    } else if ([key isEqualToString:YTKACESpeedKey]) {
+        s_atomicSpeed.store(bVal, std::memory_order_relaxed);
+    } else if ([key isEqualToString:YTKACELoopKey]) {
+        s_atomicLoop.store(bVal, std::memory_order_relaxed);
+    } else if ([key isEqualToString:YTKACESleepTimerKey]) {
+        s_atomicSleepTimer.store(bVal, std::memory_order_relaxed);
+    } else if ([key isEqualToString:YTKACESponsorBlockKey]) {
+        s_atomicSponsorBlock.store(bVal, std::memory_order_relaxed);
+    } else if ([key isEqualToString:YTKACE120HzEnabledKey]) {
+        s_atomic120HzEnabled.store(bVal, std::memory_order_relaxed);
+    } else if ([key isEqualToString:YTKACESmoothScrollBoostKey]) {
+        s_atomicSmoothScrollBoost.store(bVal, std::memory_order_relaxed);
+    } else if ([key isEqualToString:YTKACEPreserveVideoFPSKey]) {
+        s_atomicPreserveVideoFPS.store(bVal, std::memory_order_relaxed);
+    } else if ([key isEqualToString:YTKACEHighBitrateBufferBoostKey]) {
+        s_atomicBufferBoost.store(bVal, std::memory_order_relaxed);
+    } else if ([key isEqualToString:YTKACEThemePresetKey]) {
+        s_atomicThemePreset.store(iVal, std::memory_order_relaxed);
+    } else if ([key isEqualToString:YTKACEAccentPresetKey]) {
+        s_atomicAccentPreset.store(iVal, std::memory_order_relaxed);
+    } else if ([key isEqualToString:YTKACE120HzModeKey]) {
+        s_atomic120HzMode.store(iVal, std::memory_order_relaxed);
+    } else if ([key isEqualToString:YTKACEPreferredCodecKey]) {
+        s_atomicPreferredCodec.store(iVal, std::memory_order_relaxed);
+    } else if ([key isEqualToString:@"YTKACE.Preference.Downloads.Placement"]) {
+        s_atomicDownloadPlacement.store(iVal, std::memory_order_relaxed);
+    }
+
+    os_unfair_lock_lock(&s_prefLock);
+    if ([key isEqualToString:YTKACEThemeCustomBgKey] && [value isKindOfClass:NSString.class]) {
+        s_themeCustomBgHex = [value copy];
+    } else if ([key isEqualToString:YTKACEThemeCustomSurfaceKey] && [value isKindOfClass:NSString.class]) {
+        s_themeCustomSurfaceHex = [value copy];
+    } else if ([key isEqualToString:YTKACEAccentCustomHexKey] && [value isKindOfClass:NSString.class]) {
+        s_accentCustomHex = [value copy];
+    }
+    if (s_prefCache != nil) {
+        if (value != nil) {
+            s_prefCache[key] = value;
+        } else {
+            [s_prefCache removeObjectForKey:key];
+        }
+    }
+    os_unfair_lock_unlock(&s_prefLock);
+}
+
+static void YTKACESyncAtomicCacheFromDefaults(void) {
+    NSUserDefaults *defs = YTKACEDefaults();
+    s_atomicMasterEnabled.store([defs boolForKey:YTKACEMasterEnabledKey], std::memory_order_relaxed);
+    s_atomicNoAds.store([defs boolForKey:YTKACENoAdsKey], std::memory_order_relaxed);
+    s_atomicOLED.store([defs boolForKey:YTKACEOLEDKey], std::memory_order_relaxed);
+    s_atomicDownload.store([defs boolForKey:YTKACEDownloadKey], std::memory_order_relaxed);
+    s_atomicBackgroundPlayback.store([defs boolForKey:YTKACEBackgroundPlaybackKey], std::memory_order_relaxed);
+    s_atomicPiP.store([defs boolForKey:YTKACEPiPKey], std::memory_order_relaxed);
+    s_atomicSpeed.store([defs boolForKey:YTKACESpeedKey], std::memory_order_relaxed);
+    s_atomicLoop.store([defs boolForKey:YTKACELoopKey], std::memory_order_relaxed);
+    s_atomicSleepTimer.store([defs boolForKey:YTKACESleepTimerKey], std::memory_order_relaxed);
+    s_atomicSponsorBlock.store([defs boolForKey:YTKACESponsorBlockKey], std::memory_order_relaxed);
+    s_atomic120HzEnabled.store([defs boolForKey:YTKACE120HzEnabledKey], std::memory_order_relaxed);
+    s_atomicSmoothScrollBoost.store([defs boolForKey:YTKACESmoothScrollBoostKey], std::memory_order_relaxed);
+    s_atomicPreserveVideoFPS.store([defs boolForKey:YTKACEPreserveVideoFPSKey], std::memory_order_relaxed);
+    s_atomicBufferBoost.store([defs boolForKey:YTKACEHighBitrateBufferBoostKey], std::memory_order_relaxed);
+
+    s_atomicThemePreset.store([defs integerForKey:YTKACEThemePresetKey], std::memory_order_relaxed);
+    s_atomicAccentPreset.store([defs integerForKey:YTKACEAccentPresetKey], std::memory_order_relaxed);
+    s_atomic120HzMode.store([defs integerForKey:YTKACE120HzModeKey], std::memory_order_relaxed);
+    s_atomicPreferredCodec.store([defs integerForKey:YTKACEPreferredCodecKey], std::memory_order_relaxed);
+    s_atomicDownloadPlacement.store([defs integerForKey:@"YTKACE.Preference.Downloads.Placement"], std::memory_order_relaxed);
+
+    os_unfair_lock_lock(&s_prefLock);
+    NSString *bg = [defs stringForKey:YTKACEThemeCustomBgKey];
+    if (bg.length != 0) s_themeCustomBgHex = [bg copy];
+    NSString *surf = [defs stringForKey:YTKACEThemeCustomSurfaceKey];
+    if (surf.length != 0) s_themeCustomSurfaceHex = [surf copy];
+    NSString *acc = [defs stringForKey:YTKACEAccentCustomHexKey];
+    if (acc.length != 0) s_accentCustomHex = [acc copy];
+    if (s_prefCache == nil) {
+        s_prefCache = [NSMutableDictionary dictionary];
+    }
+    os_unfair_lock_unlock(&s_prefLock);
 }
 
 static void YTKACEAnnouncePreferenceChange(NSString *key) {
@@ -43,16 +177,28 @@ static void YTKACEAnnouncePreferenceChange(NSString *key) {
         [key isEqualToString:YTKACEOLEDKey]) {
         YTKACEClearThemeColorCache();
     }
-    void (^post)(void) = ^{
-        [NSNotificationCenter.defaultCenter
-            postNotificationName:YTKACEPreferencesDidChangeNotification
-                          object:nil
-                        userInfo:@{@"key": key}];
-    };
-    if (NSThread.isMainThread) {
-        post();
-    } else {
-        dispatch_async(dispatch_get_main_queue(), post);
+    NSDictionary *userInfo = @{@"key": key};
+    // Post synchronously on the current thread for instant notification dispatch:
+    [NSNotificationCenter.defaultCenter
+        postNotificationName:YTKACEPreferencesDidChangeNotification
+                      object:nil
+                    userInfo:userInfo];
+    [NSNotificationCenter.defaultCenter
+        postNotificationName:@"YTKACEPreferencesDidChange"
+                      object:nil
+                    userInfo:userInfo];
+    // If called from background thread, also dispatch to main queue for UI observers:
+    if (!NSThread.isMainThread) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [NSNotificationCenter.defaultCenter
+                postNotificationName:YTKACEPreferencesDidChangeNotification
+                              object:nil
+                            userInfo:userInfo];
+            [NSNotificationCenter.defaultCenter
+                postNotificationName:@"YTKACEPreferencesDidChange"
+                              object:nil
+                            userInfo:userInfo];
+        });
     }
 }
 
@@ -219,10 +365,11 @@ void YTKACERegisterDefaults(void) {
         }
     }
     YTKACEPurgeDownloadScratch(NO);
+    YTKACESyncAtomicCacheFromDefaults();
 }
 
 NSInteger YTKACEDownloadPlacement(void) {
-    return [YTKACEDefaults() integerForKey:@"YTKACE.Preference.Downloads.Placement"];
+    return s_atomicDownloadPlacement.load(std::memory_order_relaxed);
 }
 
 BOOL YTKACEDownloadsEnabled(void) {
@@ -230,26 +377,68 @@ BOOL YTKACEDownloadsEnabled(void) {
 }
 
 BOOL YTKACEMasterEnabled(void) {
-    return YES;
+    return s_atomicMasterEnabled.load(std::memory_order_relaxed);
 }
 
 BOOL YTKACEFeatureEnabled(NSString *key) {
-    if (!YTKACEMasterEnabled() || key.length == 0) {
+    if (key.length == 0 || !s_atomicMasterEnabled.load(std::memory_order_relaxed)) {
         return NO;
     }
-    return [YTKACEDefaults() boolForKey:key];
+    if ([key isEqualToString:YTKACEOLEDKey]) {
+        return s_atomicOLED.load(std::memory_order_relaxed);
+    }
+    if ([key isEqualToString:YTKACE120HzEnabledKey]) {
+        return s_atomic120HzEnabled.load(std::memory_order_relaxed);
+    }
+    if ([key isEqualToString:YTKACESmoothScrollBoostKey]) {
+        return s_atomicSmoothScrollBoost.load(std::memory_order_relaxed);
+    }
+    if ([key isEqualToString:YTKACEPreserveVideoFPSKey]) {
+        return s_atomicPreserveVideoFPS.load(std::memory_order_relaxed);
+    }
+    if ([key isEqualToString:YTKACEHighBitrateBufferBoostKey]) {
+        return s_atomicBufferBoost.load(std::memory_order_relaxed);
+    }
+    if ([key isEqualToString:YTKACENoAdsKey]) {
+        return s_atomicNoAds.load(std::memory_order_relaxed);
+    }
+    if ([key isEqualToString:YTKACESponsorBlockKey]) {
+        return s_atomicSponsorBlock.load(std::memory_order_relaxed);
+    }
+    if ([key isEqualToString:YTKACEDownloadKey]) {
+        return s_atomicDownload.load(std::memory_order_relaxed);
+    }
+    if ([key isEqualToString:YTKACEBackgroundPlaybackKey]) {
+        return s_atomicBackgroundPlayback.load(std::memory_order_relaxed);
+    }
+    if ([key isEqualToString:YTKACEPiPKey]) {
+        return s_atomicPiP.load(std::memory_order_relaxed);
+    }
+    if ([key isEqualToString:YTKACESpeedKey]) {
+        return s_atomicSpeed.load(std::memory_order_relaxed);
+    }
+    if ([key isEqualToString:YTKACELoopKey]) {
+        return s_atomicLoop.load(std::memory_order_relaxed);
+    }
+    if ([key isEqualToString:YTKACESleepTimerKey]) {
+        return s_atomicSleepTimer.load(std::memory_order_relaxed);
+    }
+    if ([key isEqualToString:YTKACEMasterEnabledKey]) {
+        return YES;
+    }
+
+    id obj = YTKACEPreferenceObject(key);
+    return [obj respondsToSelector:@selector(boolValue)] ? [obj boolValue] : NO;
 }
 
-static UIColor *s_cachedThemeBg[16] = {nil};
-static UIColor *s_cachedThemeSurface[16] = {nil};
-static UIColor *s_cachedAccent[16] = {nil};
-
 void YTKACEClearThemeColorCache(void) {
+    os_unfair_lock_lock(&s_colorCacheLock);
     for (int i = 0; i < 16; i++) {
         s_cachedThemeBg[i] = nil;
         s_cachedThemeSurface[i] = nil;
         s_cachedAccent[i] = nil;
     }
+    os_unfair_lock_unlock(&s_colorCacheLock);
 }
 
 UIColor *YTKACEColorFromHex(NSString *hex, UIColor *fallback) {
@@ -278,41 +467,33 @@ BOOL YTKACEIsLightMode(UITraitCollection *traits) {
 }
 
 BOOL YTKACEOLEDActive(UITraitCollection *traits) {
-    BOOL oledEnabled = YTKACEFeatureEnabled(YTKACEOLEDKey);
-    id themeVal = YTKACEPreferenceObject(YTKACEThemePresetKey);
-    NSInteger themePreset = [themeVal respondsToSelector:@selector(integerValue)] ? [themeVal integerValue] : 0;
+    BOOL oledEnabled = s_atomicOLED.load(std::memory_order_relaxed);
+    NSInteger themePreset = s_atomicThemePreset.load(std::memory_order_relaxed);
     if (!oledEnabled && themePreset == 0) {
         return NO;
     }
     UITraitCollection *current = traits;
     if (current == nil) {
-        for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
-            if (![scene isKindOfClass:UIWindowScene.class] ||
-                scene.activationState != UISceneActivationStateForegroundActive) continue;
-            for (UIWindow *window in ((UIWindowScene *)scene).windows) {
-                if (window.isKeyWindow) {
-                    current = window.traitCollection;
-                    break;
-                }
-            }
-            if (current != nil) break;
+        if (@available(iOS 13.0, *)) {
+            current = UIScreen.mainScreen.traitCollection;
         }
     }
-    current = current ?: UIScreen.mainScreen.traitCollection;
-    return current.userInterfaceStyle == UIUserInterfaceStyleDark;
+    return current ? current.userInterfaceStyle == UIUserInterfaceStyleDark : YES;
 }
 
 UIColor *YTKACEThemeBackgroundColor(UITraitCollection *traits) {
     if (!YTKACEOLEDActive(traits)) {
         return YTKACEInterfaceBackgroundColor(traits);
     }
-    id themeVal = YTKACEPreferenceObject(YTKACEThemePresetKey);
-    NSInteger preset = [themeVal respondsToSelector:@selector(integerValue)] ? [themeVal integerValue] : 0;
-    if (preset == 0 && YTKACEFeatureEnabled(YTKACEOLEDKey)) {
+    NSInteger preset = s_atomicThemePreset.load(std::memory_order_relaxed);
+    if (preset == 0 && s_atomicOLED.load(std::memory_order_relaxed)) {
         preset = 1; // Default OLED pure black
     }
-    if (preset >= 0 && preset < 16 && s_cachedThemeBg[preset] != nil) {
-        return s_cachedThemeBg[preset];
+    if (preset >= 0 && preset < 16) {
+        os_unfair_lock_lock(&s_colorCacheLock);
+        UIColor *cached = s_cachedThemeBg[preset];
+        os_unfair_lock_unlock(&s_colorCacheLock);
+        if (cached != nil) return cached;
     }
     UIColor *color = nil;
     switch (preset) {
@@ -338,7 +519,9 @@ UIColor *YTKACEThemeBackgroundColor(UITraitCollection *traits) {
             color = [UIColor colorWithRed:20.0/255.0 green:8.0/255.0 blue:11.0/255.0 alpha:1.0];
             break;
         case 8: { // Custom Hex
-            NSString *hex = [YTKACEDefaults() stringForKey:YTKACEThemeCustomBgKey];
+            os_unfair_lock_lock(&s_prefLock);
+            NSString *hex = s_themeCustomBgHex;
+            os_unfair_lock_unlock(&s_prefLock);
             color = YTKACEColorFromHex(hex, UIColor.blackColor);
             break;
         }
@@ -347,7 +530,9 @@ UIColor *YTKACEThemeBackgroundColor(UITraitCollection *traits) {
             break;
     }
     if (preset >= 0 && preset < 16) {
+        os_unfair_lock_lock(&s_colorCacheLock);
         s_cachedThemeBg[preset] = color;
+        os_unfair_lock_unlock(&s_colorCacheLock);
     }
     return color;
 }
@@ -356,13 +541,15 @@ UIColor *YTKACEThemeSurfaceColor(UITraitCollection *traits) {
     if (!YTKACEOLEDActive(traits)) {
         return YTKACEInterfaceSurfaceColor(traits);
     }
-    id themeVal = YTKACEPreferenceObject(YTKACEThemePresetKey);
-    NSInteger preset = [themeVal respondsToSelector:@selector(integerValue)] ? [themeVal integerValue] : 0;
-    if (preset == 0 && YTKACEFeatureEnabled(YTKACEOLEDKey)) {
+    NSInteger preset = s_atomicThemePreset.load(std::memory_order_relaxed);
+    if (preset == 0 && s_atomicOLED.load(std::memory_order_relaxed)) {
         preset = 1;
     }
-    if (preset >= 0 && preset < 16 && s_cachedThemeSurface[preset] != nil) {
-        return s_cachedThemeSurface[preset];
+    if (preset >= 0 && preset < 16) {
+        os_unfair_lock_lock(&s_colorCacheLock);
+        UIColor *cached = s_cachedThemeSurface[preset];
+        os_unfair_lock_unlock(&s_colorCacheLock);
+        if (cached != nil) return cached;
     }
     UIColor *color = nil;
     switch (preset) {
@@ -388,7 +575,9 @@ UIColor *YTKACEThemeSurfaceColor(UITraitCollection *traits) {
             color = [UIColor colorWithRed:36.0/255.0 green:14.0/255.0 blue:20.0/255.0 alpha:1.0];
             break;
         case 8: { // Custom Hex Surface
-            NSString *hex = [YTKACEDefaults() stringForKey:YTKACEThemeCustomSurfaceKey];
+            os_unfair_lock_lock(&s_prefLock);
+            NSString *hex = s_themeCustomSurfaceHex;
+            os_unfair_lock_unlock(&s_prefLock);
             color = YTKACEColorFromHex(hex, [UIColor colorWithWhite:0.08 alpha:1.0]);
             break;
         }
@@ -397,7 +586,9 @@ UIColor *YTKACEThemeSurfaceColor(UITraitCollection *traits) {
             break;
     }
     if (preset >= 0 && preset < 16) {
+        os_unfair_lock_lock(&s_colorCacheLock);
         s_cachedThemeSurface[preset] = color;
+        os_unfair_lock_unlock(&s_colorCacheLock);
     }
     return color;
 }
@@ -430,10 +621,12 @@ UIColor *YTKACEAppAccentColor(void) {
 
 UIColor *YTKACEAppAccentColorForTraits(UITraitCollection *traits) {
     (void)traits;
-    id presetVal = YTKACEPreferenceObject(YTKACEAccentPresetKey);
-    NSInteger preset = [presetVal respondsToSelector:@selector(integerValue)] ? [presetVal integerValue] : 0;
-    if (preset >= 0 && preset < 16 && s_cachedAccent[preset] != nil) {
-        return s_cachedAccent[preset];
+    NSInteger preset = s_atomicAccentPreset.load(std::memory_order_relaxed);
+    if (preset >= 0 && preset < 16) {
+        os_unfair_lock_lock(&s_colorCacheLock);
+        UIColor *cached = s_cachedAccent[preset];
+        os_unfair_lock_unlock(&s_colorCacheLock);
+        if (cached != nil) return cached;
     }
     UIColor *color = nil;
     switch (preset) {
@@ -459,7 +652,9 @@ UIColor *YTKACEAppAccentColorForTraits(UITraitCollection *traits) {
             color = [UIColor colorWithRed:0.96 green:0.62 blue:0.04 alpha:1.0]; // #F59E0B
             break;
         case 8: { // Custom Hex
-            NSString *hex = [YTKACEDefaults() stringForKey:YTKACEAccentCustomHexKey];
+            os_unfair_lock_lock(&s_prefLock);
+            NSString *hex = s_accentCustomHex;
+            os_unfair_lock_unlock(&s_prefLock);
             color = YTKACEColorFromHex(hex, [UIColor colorWithRed:1.0 green:0.0 blue:0.0 alpha:1.0]);
             break;
         }
@@ -468,21 +663,22 @@ UIColor *YTKACEAppAccentColorForTraits(UITraitCollection *traits) {
             break;
     }
     if (preset >= 0 && preset < 16) {
+        os_unfair_lock_lock(&s_colorCacheLock);
         s_cachedAccent[preset] = color;
+        os_unfair_lock_unlock(&s_colorCacheLock);
     }
     return color;
 }
 
 BOOL YTKACE120HzActive(void) {
-    return YTKACEFeatureEnabled(YTKACE120HzEnabledKey);
+    return s_atomic120HzEnabled.load(std::memory_order_relaxed);
 }
 
 BOOL YTKACESponsorBlockEnabled(void) {
-    if (!YTKACEMasterEnabled()) {
+    if (!s_atomicMasterEnabled.load(std::memory_order_relaxed)) {
         return NO;
     }
-
-    return [YTKACEDefaults() boolForKey:YTKACESponsorBlockKey];
+    return s_atomicSponsorBlock.load(std::memory_order_relaxed);
 }
 
 void YTKACESetPreference(NSString *key, BOOL enabled) {
@@ -491,11 +687,10 @@ void YTKACESetPreference(NSString *key, BOOL enabled) {
     }
 
     if ([key isEqualToString:YTKACEMasterEnabledKey]) {
-        [YTKACEDefaults() setBool:YES forKey:key];
-        YTKACEAnnouncePreferenceChange(key);
-        return;
+        enabled = YES;
     }
     [YTKACEDefaults() setBool:enabled forKey:key];
+    YTKACEUpdateAtomicCache(key, @(enabled));
     YTKACEAnnouncePreferenceChange(key);
 }
 
@@ -503,7 +698,70 @@ id YTKACEPreferenceObject(NSString *key) {
     if (key.length == 0) {
         return nil;
     }
-    return [YTKACEDefaults() objectForKey:key];
+    if ([key isEqualToString:YTKACEThemePresetKey]) {
+        return @(s_atomicThemePreset.load(std::memory_order_relaxed));
+    }
+    if ([key isEqualToString:YTKACEAccentPresetKey]) {
+        return @(s_atomicAccentPreset.load(std::memory_order_relaxed));
+    }
+    if ([key isEqualToString:YTKACE120HzModeKey]) {
+        return @(s_atomic120HzMode.load(std::memory_order_relaxed));
+    }
+    if ([key isEqualToString:YTKACEPreferredCodecKey]) {
+        return @(s_atomicPreferredCodec.load(std::memory_order_relaxed));
+    }
+    if ([key isEqualToString:YTKACE120HzEnabledKey]) {
+        return @(s_atomic120HzEnabled.load(std::memory_order_relaxed));
+    }
+    if ([key isEqualToString:YTKACESmoothScrollBoostKey]) {
+        return @(s_atomicSmoothScrollBoost.load(std::memory_order_relaxed));
+    }
+    if ([key isEqualToString:YTKACEPreserveVideoFPSKey]) {
+        return @(s_atomicPreserveVideoFPS.load(std::memory_order_relaxed));
+    }
+    if ([key isEqualToString:YTKACEHighBitrateBufferBoostKey]) {
+        return @(s_atomicBufferBoost.load(std::memory_order_relaxed));
+    }
+    if ([key isEqualToString:YTKACEOLEDKey]) {
+        return @(s_atomicOLED.load(std::memory_order_relaxed));
+    }
+    if ([key isEqualToString:YTKACESponsorBlockKey]) {
+        return @(s_atomicSponsorBlock.load(std::memory_order_relaxed));
+    }
+    if ([key isEqualToString:@"YTKACE.Preference.Downloads.Placement"]) {
+        return @(s_atomicDownloadPlacement.load(std::memory_order_relaxed));
+    }
+    if ([key isEqualToString:YTKACEThemeCustomBgKey]) {
+        os_unfair_lock_lock(&s_prefLock);
+        NSString *val = s_themeCustomBgHex;
+        os_unfair_lock_unlock(&s_prefLock);
+        return val;
+    }
+    if ([key isEqualToString:YTKACEThemeCustomSurfaceKey]) {
+        os_unfair_lock_lock(&s_prefLock);
+        NSString *val = s_themeCustomSurfaceHex;
+        os_unfair_lock_unlock(&s_prefLock);
+        return val;
+    }
+    if ([key isEqualToString:YTKACEAccentCustomHexKey]) {
+        os_unfair_lock_lock(&s_prefLock);
+        NSString *val = s_accentCustomHex;
+        os_unfair_lock_unlock(&s_prefLock);
+        return val;
+    }
+
+    os_unfair_lock_lock(&s_prefLock);
+    id cachedVal = s_prefCache ? s_prefCache[key] : nil;
+    os_unfair_lock_unlock(&s_prefLock);
+    if (cachedVal != nil) return cachedVal;
+
+    id defVal = [YTKACEDefaults() objectForKey:key];
+    if (defVal != nil) {
+        os_unfair_lock_lock(&s_prefLock);
+        if (s_prefCache != nil) s_prefCache[key] = defVal;
+        os_unfair_lock_unlock(&s_prefLock);
+    }
+    return defVal;
 }
 
 void YTKACESetPreferenceObject(NSString *key, id value) {
@@ -515,6 +773,7 @@ void YTKACESetPreferenceObject(NSString *key, id value) {
     } else {
         [YTKACEDefaults() setObject:value forKey:key];
     }
+    YTKACEUpdateAtomicCache(key, value);
     YTKACEAnnouncePreferenceChange(key);
 }
 

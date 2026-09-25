@@ -4,6 +4,7 @@
 #import "../../Runtime/Preferences.h"
 
 #import <Foundation/Foundation.h>
+#import <stdatomic.h>
 
 static IMP OriginalMealbarPromo;
 static IMP OriginalPromosheet;
@@ -14,8 +15,14 @@ static IMP OriginalShouldShowUpgradeDialog;
 static IMP OriginalYouTherePrompt;
 static IMP OriginalThrottleInterstitial;
 
+static atomic_int s_hidePromosCache = -1;
+
 static BOOL YTKACEHidePromos(void) {
-    return YTKACEFeatureEnabled(@"YTKACE.Preference.Ads.PremiumPromosHidden");
+    int cached = atomic_load(&s_hidePromosCache);
+    if (cached >= 0) return cached != 0;
+    BOOL val = YTKACEFeatureEnabled(@"YTKACE.Preference.Ads.PremiumPromosHidden");
+    atomic_store(&s_hidePromosCache, val ? 1 : 0);
+    return val;
 }
 
 static void YTKACEMealbarPromo(id receiver, SEL selector, id event) {
@@ -120,4 +127,11 @@ void YTKACEInstallPromoHooks(void) {
                               @"shouldThrottleInterstitial",
                               (IMP)YTKACEShouldThrottleInterstitial,
                               &OriginalThrottleInterstitial);
+
+    [NSNotificationCenter.defaultCenter
+        addObserverForName:YTKACEPreferencesDidChangeNotification
+                    object:nil queue:nil
+                usingBlock:^(__unused NSNotification *note) {
+        atomic_store(&s_hidePromosCache, -1);
+    }];
 }

@@ -4,6 +4,7 @@
 
 #import <AVFoundation/AVFoundation.h>
 #import <MediaPlayer/MediaPlayer.h>
+#import <QuartzCore/QuartzCore.h>
 #import <objc/message.h>
 #import <objc/runtime.h>
 
@@ -22,6 +23,7 @@ static const void *YTKACEIndicatorTrackAssociation = &YTKACEIndicatorTrackAssoci
 static const void *YTKACEIndicatorFillAssociation = &YTKACEIndicatorFillAssociation;
 static const void *YTKACEIndicatorLabelAssociation = &YTKACEIndicatorLabelAssociation;
 static const void *YTKACEVolumeViewAssociation = &YTKACEVolumeViewAssociation;
+static const void *YTKACEVolumeSliderAssociation = &YTKACEVolumeSliderAssociation;
 static const void *YTKACESeekIndicatorAssociation = &YTKACESeekIndicatorAssociation;
 static const void *YTKACESeekIconAssociation = &YTKACESeekIconAssociation;
 static const void *YTKACESeekLabelAssociation = &YTKACESeekLabelAssociation;
@@ -43,13 +45,15 @@ static const void *YTKACESeekLabelAssociation = &YTKACESeekLabelAssociation;
 
 @interface YTKACEGestureCoordinator : NSObject <UIGestureRecognizerDelegate>
 + (instancetype)sharedCoordinator;
-@property(nonatomic, strong) NSTimer *seekTimer;
+@property(nonatomic, strong) CADisplayLink *seekDisplayLink;
+@property(nonatomic, assign) CFTimeInterval lastSeekTickTime;
 @property(nonatomic, weak) UIResponder *seekTarget;
 @property(nonatomic, weak) UIView *seekView;
 @property(nonatomic, assign) double seekTime;
 @property(nonatomic, assign) NSInteger seekDirection;
 - (void)handleEdgePan:(UIPanGestureRecognizer *)recognizer;
 - (void)handleHold:(UILongPressGestureRecognizer *)recognizer;
+- (void)handleSeekTick:(CADisplayLink *)link;
 @end
 
 @implementation YTKACEGestureCoordinator
@@ -75,9 +79,15 @@ static const void *YTKACESeekLabelAssociation = &YTKACESeekLabelAssociation;
                                  volumeView,
                                  OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
+    UISlider *cachedSlider = objc_getAssociatedObject(volumeView, YTKACEVolumeSliderAssociation);
+    if (cachedSlider != nil) {
+        return cachedSlider;
+    }
     for (UIView *subview in volumeView.subviews) {
         if ([subview isKindOfClass:UISlider.class]) {
-            return (UISlider *)subview;
+            UISlider *slider = (UISlider *)subview;
+            objc_setAssociatedObject(volumeView, YTKACEVolumeSliderAssociation, slider, OBJC_ASSOCIATION_ASSIGN);
+            return slider;
         }
     }
     return nil;
@@ -168,11 +178,14 @@ static const void *YTKACESeekLabelAssociation = &YTKACESeekLabelAssociation;
 }
 
 - (UIViewController *)playerControllerForView:(UIView *)view {
+    static Class playerVCClass;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        playerVCClass = NSClassFromString(@"YTPlayerViewController");
+    });
     UIResponder *responder = view;
     while (responder != nil) {
-        if ([NSStringFromClass(responder.class)
-                isEqualToString:@"YTPlayerViewController"] &&
-            [responder isKindOfClass:UIViewController.class]) {
+        if (playerVCClass != Nil && [responder isKindOfClass:playerVCClass]) {
             return (UIViewController *)responder;
         }
         responder = responder.nextResponder;
@@ -241,6 +254,26 @@ shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)other 
         CGRect activeBounds = view.bounds;
         if (CGRectIsEmpty(activeBounds) || CGRectIsNull(activeBounds)) return NO;
         if (fabs(velocity.y) <= fabs(velocity.x)) return NO;
+
+        // Two-finger swipe support: allowed anywhere across player surface!
+        if (gestureRecognizer.numberOfTouches == 2) {
+            BOOL left = location.x < CGRectGetMidX(activeBounds);
+            NSString *key = left
+                ? @"YTKACE.Preference.Gestures.LeftAction"
+                : @"YTKACE.Preference.Gestures.RightAction";
+            NSInteger action = [YTKACEPreferenceObject(key) integerValue];
+            if (action == 0) {
+                // Default fallback: left = brightness (1), right = volume (2)
+                action = left ? 1 : 2;
+            }
+            objc_setAssociatedObject(gestureRecognizer,
+                                     YTKACEGestureActionAssociation,
+                                     @(action),
+                                     OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            return YES;
+        }
+
+        // Single-finger edge swipe
         double storedArea = [YTKACEPreferenceObject(
             @"YTKACE.Preference.Gestures.ActivationArea") doubleValue];
         double areaPercent = storedArea > 0.0 ? storedArea : 20.0;
@@ -316,12 +349,17 @@ shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)other 
     label.font = [UIFont systemFontOfSize:12.0 * scale weight:UIFontWeightMedium];
 }
 
-- (void)updateIndicatorInView:(UIView *)view value:(double)value volume:(BOOL)volume {
+- (void)updateIndicatorInView:(UIView *)view value:(double)value volume:(BOOL)volume isInitial:(BOOL)isInitial {
     if (!YTKACEFeatureEnabled(@"YTKACE.Preference.Gestures.HUDEnabled")) return;
     UIView *indicator = [self indicatorInView:view];
     UIImageView *icon = objc_getAssociatedObject(view, YTKACEIndicatorIconAssociation);
     UIView *fill = objc_getAssociatedObject(view, YTKACEIndicatorFillAssociation);
     UILabel *label = objc_getAssociatedObject(view, YTKACEIndicatorLabelAssociation);
+
+    if (isInitial) {
+        [self layoutIndicator:indicator inView:view];
+    }
+
     NSString *symbol = nil;
     if (volume) {
         if (value <= 0.01) symbol = @"speaker.slash.fill";
@@ -333,10 +371,11 @@ shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)other 
     }
     icon.image = [[UIImage systemImageNamed:symbol]
         imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
-    [self layoutIndicator:indicator inView:view];
+
+    CGFloat trackX = fill.frame.origin.x;
+    CGFloat availableWidth = indicator.bounds.size.width - trackX - 20.0 * (indicator.bounds.size.height / 50.0);
     CGRect frame = fill.frame;
-    frame.size.width = (indicator.bounds.size.width - frame.origin.x -
-                        20.0 * (indicator.bounds.size.height / 50.0)) * value;
+    frame.size.width = availableWidth * value;
     fill.frame = frame;
     label.text = [NSString stringWithFormat:@"%d%%", (int)lround(value * 100.0)];
     [view bringSubviewToFront:indicator];
@@ -348,6 +387,7 @@ shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)other 
         recognizer, YTKACEGestureActionAssociation) integerValue];
     BOOL volume = action == 2;
     BOOL both = action == 3;
+
     if (recognizer.state == UIGestureRecognizerStateBegan) {
         double start = volume
             ? AVAudioSession.sharedInstance.outputVolume
@@ -363,9 +403,13 @@ shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)other 
                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         }
         if (YTKACEFeatureEnabled(@"YTKACE.Preference.Gestures.HUDEnabled")) {
-            [self updateIndicatorInView:view value:start volume:volume];
+            [self updateIndicatorInView:view value:start volume:volume isInitial:YES];
             UIView *indicator = [self indicatorInView:view];
-            [UIView animateWithDuration:0.15 animations:^{ indicator.alpha = 1.0; }];
+            [UIView animateWithDuration:0.12
+                                  delay:0.0
+                                options:UIViewAnimationOptionCurveEaseOut | UIViewAnimationOptionBeginFromCurrentState
+                             animations:^{ indicator.alpha = 1.0; }
+                             completion:nil];
         }
     }
     if (recognizer.state == UIGestureRecognizerStateChanged) {
@@ -392,7 +436,7 @@ shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)other 
             }
         }
         if (YTKACEFeatureEnabled(@"YTKACE.Preference.Gestures.HUDEnabled")) {
-            [self updateIndicatorInView:view value:value volume:volume];
+            [self updateIndicatorInView:view value:value volume:volume isInitial:NO];
         }
     }
     if (recognizer.state == UIGestureRecognizerStateEnded ||
@@ -401,7 +445,7 @@ shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)other 
             UIView *indicator = [self indicatorInView:view];
             [UIView animateWithDuration:0.22
                                   delay:0.45
-                                options:UIViewAnimationOptionBeginFromCurrentState
+                                options:UIViewAnimationOptionCurveEaseIn | UIViewAnimationOptionBeginFromCurrentState
                              animations:^{ indicator.alpha = 0.0; }
                              completion:nil];
         }
@@ -420,15 +464,24 @@ shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)other 
 }
 
 - (UIResponder *)seekResponderForView:(UIView *)view {
+    static SEL currentMediaTimeSel;
+    static SEL mediaTimeSel;
+    static SEL seekToTimeSel;
+    static SEL didSeekToTimeSel;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        currentMediaTimeSel = NSSelectorFromString(@"currentVideoMediaTime");
+        mediaTimeSel = NSSelectorFromString(@"mediaTime");
+        seekToTimeSel = NSSelectorFromString(@"seekToTime:");
+        didSeekToTimeSel = NSSelectorFromString(@"didSeekToTime:toleranceBefore:toleranceAfter:");
+    });
+
     UIResponder *responder = view;
     while (responder != nil) {
-        BOOL hasTime =
-            [responder respondsToSelector:NSSelectorFromString(@"currentVideoMediaTime")] ||
-            [responder respondsToSelector:NSSelectorFromString(@"mediaTime")];
-        BOOL canSeek =
-            [responder respondsToSelector:NSSelectorFromString(@"seekToTime:")] ||
-            [responder respondsToSelector:
-                NSSelectorFromString(@"didSeekToTime:toleranceBefore:toleranceAfter:")];
+        BOOL hasTime = [responder respondsToSelector:currentMediaTimeSel] ||
+                       [responder respondsToSelector:mediaTimeSel];
+        BOOL canSeek = [responder respondsToSelector:seekToTimeSel] ||
+                       [responder respondsToSelector:didSeekToTimeSel];
         if (hasTime && canSeek) {
             return responder;
         }
@@ -450,8 +503,8 @@ shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)other 
 - (void)performSeek {
     id target = self.seekTarget;
     if (target == nil) {
-        [self.seekTimer invalidate];
-        self.seekTimer = nil;
+        [self.seekDisplayLink invalidate];
+        self.seekDisplayLink = nil;
         return;
     }
 
@@ -469,16 +522,21 @@ shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)other 
         self.seekTime = MIN(maximum, self.seekTime);
     }
 
-    SEL detailed =
-        NSSelectorFromString(@"didSeekToTime:toleranceBefore:toleranceAfter:");
-    SEL simple = NSSelectorFromString(@"seekToTime:");
-    if ([target respondsToSelector:detailed]) {
+    static SEL detailedSel;
+    static SEL simpleSel;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        detailedSel = NSSelectorFromString(@"didSeekToTime:toleranceBefore:toleranceAfter:");
+        simpleSel = NSSelectorFromString(@"seekToTime:");
+    });
+
+    if ([target respondsToSelector:detailedSel]) {
         ((void (*)(id, SEL, double, double, double))objc_msgSend)(
-            target, detailed, self.seekTime, 0.0, 0.0
+            target, detailedSel, self.seekTime, 0.0, 0.0
         );
-    } else if ([target respondsToSelector:simple]) {
+    } else if ([target respondsToSelector:simpleSel]) {
         ((void (*)(id, SEL, double))objc_msgSend)(
-            target, simple, self.seekTime
+            target, simpleSel, self.seekTime
         );
     }
 
@@ -494,7 +552,19 @@ shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)other 
     indicator.center = CGPointMake(CGRectGetMidX(self.seekView.bounds),
                                    CGRectGetMidY(self.seekView.bounds));
     [self.seekView bringSubviewToFront:indicator];
-    [UIView animateWithDuration:0.2 animations:^{ indicator.alpha = 1.0; }];
+    [UIView animateWithDuration:0.15
+                          delay:0.0
+                        options:UIViewAnimationOptionCurveEaseOut | UIViewAnimationOptionBeginFromCurrentState
+                     animations:^{ indicator.alpha = 1.0; }
+                     completion:nil];
+}
+
+- (void)handleSeekTick:(CADisplayLink *)link {
+    CFTimeInterval now = CACurrentMediaTime();
+    if (self.lastSeekTickTime == 0.0 || (now - self.lastSeekTickTime) >= 0.1) {
+        self.lastSeekTickTime = now;
+        [self performSeek];
+    }
 }
 
 - (void)handleHold:(UILongPressGestureRecognizer *)recognizer {
@@ -514,23 +584,23 @@ shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)other 
                                            @"mediaTime"
                                        ]];
         [self performSeek];
-        __weak YTKACEGestureCoordinator *weakSelf = self;
-        self.seekTimer =
-            [NSTimer scheduledTimerWithTimeInterval:0.1
-                                           repeats:YES
-                                             block:^(NSTimer *timer) {
-            (void)timer;
-            [weakSelf performSeek];
-        }];
+        [self.seekDisplayLink invalidate];
+        self.lastSeekTickTime = CACurrentMediaTime();
+        CADisplayLink *link = [CADisplayLink displayLinkWithTarget:self selector:@selector(handleSeekTick:)];
+        if (@available(iOS 15.0, *)) {
+            link.preferredFrameRateRange = CAFrameRateRangeMake(30.0f, 60.0f, 120.0f);
+        }
+        [link addToRunLoop:NSRunLoop.mainRunLoop forMode:NSRunLoopCommonModes];
+        self.seekDisplayLink = link;
     } else if (recognizer.state == UIGestureRecognizerStateEnded ||
                recognizer.state == UIGestureRecognizerStateCancelled ||
                recognizer.state == UIGestureRecognizerStateFailed) {
-        [self.seekTimer invalidate];
-        self.seekTimer = nil;
+        [self.seekDisplayLink invalidate];
+        self.seekDisplayLink = nil;
         UIView *indicator = [self seekIndicatorInView:self.seekView];
-        [UIView animateWithDuration:0.3
-                              delay:0.5
-                            options:UIViewAnimationOptionBeginFromCurrentState
+        [UIView animateWithDuration:0.25
+                              delay:0.4
+                            options:UIViewAnimationOptionCurveEaseIn | UIViewAnimationOptionBeginFromCurrentState
                          animations:^{
             indicator.alpha = 0.0;
         } completion:nil];
@@ -552,7 +622,8 @@ static void YTKACEAttachPlayerGestures(UIView *playerView,
         [[YTKACEPriorityPanGestureRecognizer alloc]
             initWithTarget:YTKACEGestureCoordinator.sharedCoordinator
                     action:@selector(handleEdgePan:)];
-    edgePan.maximumNumberOfTouches = 1;
+    edgePan.minimumNumberOfTouches = 1;
+    edgePan.maximumNumberOfTouches = 2;
     edgePan.cancelsTouchesInView = YES;
     edgePan.delaysTouchesBegan = NO;
     edgePan.delaysTouchesEnded = NO;

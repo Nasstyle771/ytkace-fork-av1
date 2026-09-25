@@ -23,6 +23,7 @@ static IMP OriginalSetDefaultSelectedPivot;
 static BOOL YTKACEStartupNative;
 static IMP OriginalPivotBarStyleColors;
 static IMP OriginalPivotBarSetBackgroundStyle;
+static IMP OriginalBadgeViewLayout;
 static IMP OriginalAppViewDidLoad;
 static IMP OriginalBrowseViewDidLoad;
 static IMP OriginalBrowseResponseViewDidLoad;
@@ -1170,12 +1171,47 @@ static void YTKACEApplyExtraTabIcon(UIView *view) {
     );
 }
 
+static void YTKACEStyleBadgeInView(UIView *view) {
+    UIColor *accent = YTKACEAppAccentColor();
+    for (UIView *subview in view.subviews) {
+        NSString *className = NSStringFromClass(subview.class);
+        BOOL isBadgeClass = [className containsString:@"Badge"] ||
+                            [className containsString:@"badge"] ||
+                            [className containsString:@"Indicator"] ||
+                            [className containsString:@"indicator"] ||
+                            [className containsString:@"Dot"] ||
+                            [className containsString:@"dot"];
+        BOOL isBadgeGeometry = (subview.layer.cornerRadius > 0 &&
+                                CGRectGetWidth(subview.bounds) > 2.0 &&
+                                CGRectGetWidth(subview.bounds) <= 28.0 &&
+                                CGRectGetHeight(subview.bounds) > 2.0 &&
+                                CGRectGetHeight(subview.bounds) <= 28.0 &&
+                                subview.tag != 0x59414345 && subview.tag != YTKACEExtraIconTag &&
+                                subview.tag != 0x59414347 && subview.tag != YTKACEExtraLabelTag);
+        if (isBadgeClass || isBadgeGeometry) {
+            subview.backgroundColor = accent;
+            subview.tintColor = accent;
+            for (UIView *child in subview.subviews) {
+                if ([child isKindOfClass:UILabel.class]) {
+                    CGFloat r = 0, g = 0, b = 0, a = 0;
+                    if ([accent getRed:&r green:&g blue:&b alpha:&a]) {
+                        CGFloat lum = r * 0.2126 + g * 0.7152 + b * 0.0722;
+                        ((UILabel *)child).textColor = lum < 0.5 ? UIColor.whiteColor : UIColor.blackColor;
+                    }
+                }
+            }
+        }
+        YTKACEStyleBadgeInView(subview);
+    }
+}
+
 static void YTKACEApplyPivotItemPresentation(UIView *view) {
     BOOL hideLabels = YTKACEFeatureEnabled(@"YTKACE.Preference.Tabs.LabelsHidden");
     YTKACESetLabelsHidden(view, hideLabels);
     YTKACEApplyDownloadIcon(view);
     YTKACEApplyExtraTabIcon(view);
     YTKACECenterPivotIcon(view, hideLabels);
+    YTKACEStyleBadgeInView(view);
 }
 
 static void YTKACEPivotButtonLayout(UIView *receiver, SEL selector) {
@@ -1494,6 +1530,15 @@ static void YTKACEPivotItemTraitChanged(UIView *receiver,
     }
 }
 
+static void YTKACEBadgeViewLayout(UIView *receiver, SEL selector) {
+    if (OriginalBadgeViewLayout != NULL) {
+        ((void (*)(id, SEL))OriginalBadgeViewLayout)(receiver, selector);
+    }
+    UIColor *accent = YTKACEAppAccentColor();
+    receiver.backgroundColor = accent;
+    receiver.tintColor = accent;
+}
+
 void YTKACEInstallTabBarHooks(void) {
     YTKACEInstallInstanceHook(@"UILabel",
                               @"setHidden:",
@@ -1559,4 +1604,12 @@ void YTKACEInstallTabBarHooks(void) {
                               @"viewDidLoad",
                               (IMP)YTKACEWrapperViewDidLoad,
                               &OriginalWrapperViewDidLoad);
+    YTKACEInstallInstanceHook(@"YTNotificationBadgeView",
+                              @"layoutSubviews",
+                              (IMP)YTKACEBadgeViewLayout,
+                              &OriginalBadgeViewLayout);
+    YTKACEInstallInstanceHook(@"YTPivotBarItemBadgeView",
+                              @"layoutSubviews",
+                              (IMP)YTKACEBadgeViewLayout,
+                              NULL);
 }

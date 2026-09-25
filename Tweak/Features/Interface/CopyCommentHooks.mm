@@ -183,6 +183,7 @@ static NSString *YTKACECommentTextForView(UIView *view) {
     for (NSUInteger depth = 0; candidate != nil && depth < 8; depth++) {
         NSString *text = YTKACECommentTextInView(candidate, YES, 0);
         if (text.length != 0) {
+            objc_setAssociatedObject(view, YTKACEStoredCommentAssociation, text, OBJC_ASSOCIATION_COPY_NONATOMIC);
             return text;
         }
         candidate = candidate.superview;

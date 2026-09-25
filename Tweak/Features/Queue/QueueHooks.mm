@@ -75,7 +75,7 @@ static NSString *YTKACEQueueCurrentOverride;
 static NSString *YTKACEQueueActiveVideo;
 static __weak id YTKACEQueuePanelController;
 static __weak id YTKACEQueueControllerInstance;
-static id YTKACELastWatchNextResponse;
+static __weak id YTKACELastWatchNextResponse;
 static BOOL YTKACEQueuePanelInjected;
 static __weak id YTKACEQueueWatchViewController;
 static IMP OriginalRouterHandle;
@@ -961,7 +961,17 @@ static void YTKACEQueueSyncFromController(id controller) {
     } @catch (__unused NSException *exception) {
         return;
     }
-    NSMutableArray *ordered = [NSMutableArray array];
+    if (![items isKindOfClass:NSArray.class] || items.count == 0) return;
+    NSMutableArray *currentQueue = YTKACEQueue();
+    if (currentQueue.count == 0) return;
+
+    NSMutableDictionary<NSString *, NSDictionary *> *lookup = [NSMutableDictionary dictionaryWithCapacity:currentQueue.count];
+    for (NSDictionary *entry in currentQueue) {
+        NSString *vID = entry[@"videoId"];
+        if (vID.length != 0) lookup[vID] = entry;
+    }
+
+    NSMutableArray *ordered = [NSMutableArray arrayWithCapacity:items.count];
     for (id item in items) {
         NSString *videoID = nil;
         @try {
@@ -970,26 +980,39 @@ static void YTKACEQueueSyncFromController(id controller) {
             videoID = nil;
         }
         if (videoID.length == 0) continue;
-        NSUInteger existing = YTKACEQueueIndexOfVideo(videoID);
-        if (existing == NSNotFound) continue;
-        [ordered addObject:YTKACEQueue()[existing]];
+        NSDictionary *entry = lookup[videoID];
+        if (entry != nil) {
+            [ordered addObject:entry];
+        }
     }
     if (ordered.count == 0) return;
-    if (ordered.count == YTKACEQueue().count) {
+    if (ordered.count == currentQueue.count) {
         BOOL identical = YES;
         for (NSUInteger index = 0; index < ordered.count; index++) {
-            if (ordered[index] == YTKACEQueue()[index]) continue;
+            if (ordered[index] == currentQueue[index]) continue;
             identical = NO;
             break;
         }
         if (identical) return;
     }
-    [YTKACEQueue() setArray:ordered];
+    [currentQueue setArray:ordered];
     YTKACEQueueSave();
 }
 
 static void YTKACEQueueMoveItem(id receiver, SEL selector, id from, id to,
                                 BOOL triggered) {
+    if ([from respondsToSelector:@selector(item)] && [to respondsToSelector:@selector(item)]) {
+        NSInteger fromRow = [from respondsToSelector:@selector(row)] ? [from row] : [from item];
+        NSInteger toRow = [to respondsToSelector:@selector(row)] ? [to row] : [to item];
+        NSMutableArray *queue = YTKACEQueue();
+        if (fromRow >= 0 && fromRow < (NSInteger)queue.count &&
+            toRow >= 0 && toRow < (NSInteger)queue.count && fromRow != toRow) {
+            NSDictionary *moved = queue[fromRow];
+            [queue removeObjectAtIndex:fromRow];
+            [queue insertObject:moved atIndex:toRow];
+            YTKACEQueueSave();
+        }
+    }
     if (OriginalMoveItem != NULL) {
         ((void (*)(id, SEL, id, id, BOOL))OriginalMoveItem)(
             receiver, selector, from, to, triggered);
@@ -1634,6 +1657,13 @@ static BOOL YTKACEQueueScopedRouterHandleCompletion(id receiver, SEL selector,
         receiver, selector, command, entry, view, sender, block);
 }
 
+static BOOL YTKACEGaplessEnabled(id receiver, SEL selector) {
+    (void)receiver;
+    (void)selector;
+    if (YTKACEQueueHasItems()) return YES;
+    return YES;
+}
+
 void YTKACEInstallQueueHooks(void) {
     YTKACEInstallInstanceHook(
         @"MDXRequestDeviceDiscoveryCommandHandlerImpl",
@@ -1767,4 +1797,8 @@ void YTKACEInstallQueueHooks(void) {
                 usingBlock:^(NSNotification *notification) {
         YTKACEQueueHandlePlaybackTime(notification);
     }];
+
+    for (NSString *gaplessSel in @[@"isGaplessPlaybackEnabled", @"gaplessPlaybackEnabled", @"shouldPreloadNextVideo", @"canPreloadNextVideo"]) {
+        YTKACEInstallInstanceHook(@"YTGaplessPlaybackCoordinator", gaplessSel, (IMP)YTKACEGaplessEnabled, NULL);
+    }
 }

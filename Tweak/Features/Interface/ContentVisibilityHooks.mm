@@ -69,13 +69,24 @@ static BOOL YTKACEEnsureStructuralActionHook(void);
 static BOOL YTKACEEnsureActionCellControllerHooks(void);
 static BOOL YTKACEEnsureActionCollectionLayoutHook(void);
 
+static const void *YTKACEViewActionPrefAssociation = &YTKACEViewActionPrefAssociation;
+
 static BOOL YTKACEViewIsInsideWatchActionBar(UIView *view) {
+    static Class actionsViewClass;
+    static Class cellClass;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        actionsViewClass = NSClassFromString(@"YTSlimVideoScrollableDetailsActionsView");
+        cellClass = NSClassFromString(@"YTSlimVideoScrollableActionBarCell");
+    });
     for (UIView *candidate = view; candidate != nil; candidate = candidate.superview) {
-        NSString *identifier = [candidate.accessibilityIdentifier lowercaseString] ?: @"";
-        NSString *className = NSStringFromClass(candidate.class) ?: @"";
-        if ([identifier containsString:@"scrollable_action_bar"] ||
-            [className containsString:@"SlimVideoScrollableDetailsActionsView"] ||
-            [className containsString:@"SlimVideoScrollableActionBarCell"]) {
+        if ((actionsViewClass != Nil && [candidate isKindOfClass:actionsViewClass]) ||
+            (cellClass != Nil && [candidate isKindOfClass:cellClass])) {
+            return YES;
+        }
+        NSString *identifier = candidate.accessibilityIdentifier;
+        if (identifier.length != 0 &&
+            [identifier rangeOfString:@"scrollable_action_bar" options:NSCaseInsensitiveSearch].location != NSNotFound) {
             return YES;
         }
         if ([candidate isKindOfClass:UICollectionView.class] &&
@@ -134,7 +145,15 @@ static BOOL YTKACEAnyActionPreferenceEnabled(void) {
 }
 
 static NSString *YTKACEActionPreferenceForView(UIView *view) {
-    if (view == nil || !YTKACEViewIsInsideWatchActionBar(view)) return nil;
+    if (view == nil) return nil;
+    NSString *cached = objc_getAssociatedObject(view, YTKACEViewActionPrefAssociation);
+    if (cached != nil) {
+        return cached.length != 0 ? cached : nil;
+    }
+    if (!YTKACEViewIsInsideWatchActionBar(view)) {
+        objc_setAssociatedObject(view, YTKACEViewActionPrefAssociation, @"", OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        return nil;
+    }
     for (NSString *name in @[@"entry", @"renderer", @"buttonRenderer",
                              @"model", @"elementRenderer"]) {
         SEL selector = NSSelectorFromString(name);
@@ -143,6 +162,7 @@ static NSString *YTKACEActionPreferenceForView(UIView *view) {
         if (related == nil || [related isKindOfClass:UIView.class]) continue;
         NSString *preference = YTKACEActionPreference(related);
         if (preference.length != 0) {
+            objc_setAssociatedObject(view, YTKACEViewActionPrefAssociation, preference, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
             return preference;
         }
     }
@@ -209,10 +229,13 @@ static NSString *YTKACEActionPreferenceForView(UIView *view) {
                     [shape addObject:entry];
                     [pending addObjectsFromArray:node.subviews];
                 }
-                return rule.firstObject;
+                NSString *matchedPref = rule.firstObject;
+                objc_setAssociatedObject(view, YTKACEViewActionPrefAssociation, matchedPref ?: @"", OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                return matchedPref;
             }
         }
     }
+    objc_setAssociatedObject(view, YTKACEViewActionPrefAssociation, @"", OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     return nil;
 }
 

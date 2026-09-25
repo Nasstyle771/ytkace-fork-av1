@@ -29,7 +29,7 @@ static BOOL YTKACECommitTapSeek(UIResponder *first, double time) {
         }
         if ([responder respondsToSelector:legacy]) {
             ((void (*)(id, SEL, double, double, double))objc_msgSend)(
-                responder, legacy, time, 0.0, 0.0);
+                responder, legacy, time, 0.1, 0.1);
             return YES;
         }
     }

@@ -14,6 +14,8 @@ static IMP OriginalDidLoadContentPlaybackData;
 static IMP OriginalQualityHandleTap;
 static IMP OriginalPlayerItemSetForwardBufferDuration;
 static IMP OriginalPlayerItemForwardBufferDuration;
+static IMP OriginalPlayerItemInitWithURL;
+static IMP OriginalPlayerItemInitWithAsset;
 static NSMutableDictionary<NSString *, NSValue *> *YTKACEStreamingOriginals;
 static const void *YTKACERedesignedQualityControllerKey =
     &YTKACERedesignedQualityControllerKey;
@@ -37,6 +39,8 @@ static IMP YTKACEStreamingOriginal(id receiver, SEL selector) {
 static void YTKACEPlayerItemSetForwardBufferDuration(AVPlayerItem *receiver, SEL selector, NSTimeInterval duration) {
     if (YTKACEFeatureEnabled(YTKACEHighBitrateBufferBoostKey)) {
         if (duration < 60.0) duration = 60.0;
+        receiver.preferredPeakBitRate = 0.0;
+        receiver.automaticallyWaitsToMinimizeStalling = YES;
     }
     if (OriginalPlayerItemSetForwardBufferDuration != NULL) {
         ((void (*)(id, SEL, NSTimeInterval))OriginalPlayerItemSetForwardBufferDuration)(
@@ -52,6 +56,61 @@ static NSTimeInterval YTKACEPlayerItemForwardBufferDuration(AVPlayerItem *receiv
         if (duration < 60.0) duration = 60.0;
     }
     return duration;
+}
+
+static id YTKACEPlayerItemInitWithURL(AVPlayerItem *receiver, SEL selector, NSURL *url) {
+    id item = OriginalPlayerItemInitWithURL != NULL
+        ? ((id (*)(id, SEL, id))OriginalPlayerItemInitWithURL)(receiver, selector, url)
+        : receiver;
+    if (item != nil && YTKACEFeatureEnabled(YTKACEHighBitrateBufferBoostKey)) {
+        [item setPreferredForwardBufferDuration:60.0];
+        [item setAutomaticallyWaitsToMinimizeStalling:YES];
+        [item setPreferredPeakBitRate:0.0];
+    }
+    return item;
+}
+
+static id YTKACEPlayerItemInitWithAsset(AVPlayerItem *receiver, SEL selector, AVAsset *asset) {
+    id item = OriginalPlayerItemInitWithAsset != NULL
+        ? ((id (*)(id, SEL, id))OriginalPlayerItemInitWithAsset)(receiver, selector, asset)
+        : receiver;
+    if (item != nil && YTKACEFeatureEnabled(YTKACEHighBitrateBufferBoostKey)) {
+        [item setPreferredForwardBufferDuration:60.0];
+        [item setAutomaticallyWaitsToMinimizeStalling:YES];
+        [item setPreferredPeakBitRate:0.0];
+    }
+    return item;
+}
+
+static double YTKACEHAMBufferDuration(id receiver, SEL selector) {
+    IMP original = YTKACEStreamingOriginal(receiver, selector);
+    double duration = original != NULL ? ((double (*)(id, SEL))original)(receiver, selector) : 0.0;
+    if (YTKACEFeatureEnabled(YTKACEHighBitrateBufferBoostKey)) {
+        NSString *selName = NSStringFromSelector(selector);
+        if ([selName containsString:@"max"] || [selName containsString:@"Max"]) {
+            return duration < 120.0 ? 120.0 : duration;
+        }
+        if ([selName containsString:@"min"] || [selName containsString:@"Min"]) {
+            return duration < 5.0 ? 5.0 : duration;
+        }
+        return duration < 60.0 ? 60.0 : duration;
+    }
+    return duration;
+}
+
+static void YTKACEHAMSetBufferDuration(id receiver, SEL selector, double duration) {
+    if (YTKACEFeatureEnabled(YTKACEHighBitrateBufferBoostKey)) {
+        NSString *selName = NSStringFromSelector(selector);
+        if ([selName containsString:@"max"] || [selName containsString:@"Max"]) {
+            if (duration < 120.0) duration = 120.0;
+        } else {
+            if (duration < 60.0) duration = 60.0;
+        }
+    }
+    IMP original = YTKACEStreamingOriginal(receiver, selector);
+    if (original != NULL) {
+        ((void (*)(id, SEL, double))original)(receiver, selector, duration);
+    }
 }
 
 static BOOL YTKACELegacyQuality(id receiver, SEL selector) {
@@ -105,24 +164,91 @@ static NSInteger YTKACEResolution(NSString *label) {
     return [scanner scanInteger:&value] ? value : 0;
 }
 
+static NSInteger YTKACEFormatCodecScore(id format, NSInteger preferredCodec) {
+    NSString *mime = YTKACEValue(format, @"mimeType");
+    NSString *codecs = YTKACEValue(format, @"codecs");
+    NSString *combined = [NSString stringWithFormat:@"%@ %@", mime ?: @"", codecs ?: @""].lowercaseString;
+    BOOL isAV1 = [combined containsString:@"av01"] || [combined containsString:@"av1"];
+    BOOL isVP9 = [combined containsString:@"vp9"] || [combined containsString:@"vp09"];
+    BOOL isH264 = [combined containsString:@"avc"] || [combined containsString:@"h264"];
+
+    if (preferredCodec == 1) { // Prefer AV1
+        if (isAV1) return 4;
+        if (isVP9) return 3;
+        if (isH264) return 2;
+    } else if (preferredCodec == 2) { // Prefer VP9
+        if (isVP9) return 4;
+        if (isAV1) return 3;
+        if (isH264) return 2;
+    } else if (preferredCodec == 3) { // Prefer H.264
+        if (isH264) return 4;
+        if (isAV1) return 3;
+        if (isVP9) return 2;
+    } else { // Auto (AV1 > H.264 > VP9)
+        if (isAV1) return 4;
+        if (isH264) return 3;
+        if (isVP9) return 2;
+    }
+    return 1;
+}
+
+static NSArray *YTKACEPrioritizeFormatsByCodec(NSArray *formats) {
+    if (![formats isKindOfClass:NSArray.class] || formats.count <= 1) {
+        return formats;
+    }
+    id pref = YTKACEPreferenceObject(YTKACEPreferredCodecKey);
+    NSInteger preferredCodec = [pref respondsToSelector:@selector(integerValue)] ? [pref integerValue] : 1;
+
+    return [formats sortedArrayUsingComparator:^NSComparisonResult(id obj1, id obj2) {
+        NSInteger res1 = YTKACEResolution(YTKACEValue(obj1, @"qualityLabel"));
+        NSInteger res2 = YTKACEResolution(YTKACEValue(obj2, @"qualityLabel"));
+        if (res1 != res2) {
+            return res1 > res2 ? NSOrderedAscending : NSOrderedDescending;
+        }
+        NSInteger score1 = YTKACEFormatCodecScore(obj1, preferredCodec);
+        NSInteger score2 = YTKACEFormatCodecScore(obj2, preferredCodec);
+        if (score1 != score2) {
+            return score1 > score2 ? NSOrderedAscending : NSOrderedDescending;
+        }
+        long long bit1 = [YTKACEValue(obj1, @"bitrate") longLongValue];
+        long long bit2 = [YTKACEValue(obj2, @"bitrate") longLongValue];
+        if (bit1 != bit2) {
+            return bit1 > bit2 ? NSOrderedAscending : NSOrderedDescending;
+        }
+        return NSOrderedSame;
+    }];
+}
+
 static NSString *YTKACETargetQualityLabel(NSArray *formats, NSString *target) {
     NSString *nearest = nil;
     NSInteger nearestDistance = NSIntegerMax;
     NSInteger targetResolution = YTKACEResolution(target);
+    id pref = YTKACEPreferenceObject(YTKACEPreferredCodecKey);
+    NSInteger preferredCodec = [pref respondsToSelector:@selector(integerValue)] ? [pref integerValue] : 1;
+    NSInteger bestCodecScore = -1;
+
     for (id format in formats) {
         id value = YTKACEValue(format, @"qualityLabel");
         if (![value isKindOfClass:NSString.class]) {
             continue;
         }
         NSString *label = value;
-        if ([label isEqualToString:target]) {
-            return label;
-        }
         NSInteger resolution = YTKACEResolution(label);
         NSInteger distance = labs(resolution - targetResolution);
-        if (resolution > 0 && distance < nearestDistance) {
+        NSInteger codecScore = YTKACEFormatCodecScore(format, preferredCodec);
+
+        if ([label isEqualToString:target]) {
+            if (codecScore > bestCodecScore) {
+                bestCodecScore = codecScore;
+                nearest = label;
+            }
+            continue;
+        }
+        if (bestCodecScore < 0 || distance < nearestDistance ||
+            (distance == nearestDistance && codecScore > bestCodecScore)) {
             nearest = label;
             nearestDistance = distance;
+            bestCodecScore = codecScore;
         }
     }
     return nearest;
@@ -198,7 +324,7 @@ static void YTKACEDidLoadContentPlaybackData(id receiver,
 static void YTKACESetUserSelectableFormats(id receiver,
                                             SEL selector,
                                             NSArray *formats) {
-    NSArray *selectedFormats = formats;
+    NSArray *selectedFormats = YTKACEPrioritizeFormatsByCodec(formats);
     if (YTKACEFeatureEnabled(@"YTKACE.Preference.Playback.LegacyQualityMenu")) {
         id redesigned = objc_getAssociatedObject(
             receiver, YTKACERedesignedQualityControllerKey);
@@ -516,4 +642,43 @@ void YTKACEInstallStreamingHooks(void) {
                               @"preferredForwardBufferDuration",
                               (IMP)YTKACEPlayerItemForwardBufferDuration,
                               &OriginalPlayerItemForwardBufferDuration);
+    YTKACEInstallInstanceHook(@"AVPlayerItem",
+                              @"initWithURL:",
+                              (IMP)YTKACEPlayerItemInitWithURL,
+                              &OriginalPlayerItemInitWithURL);
+    YTKACEInstallInstanceHook(@"AVPlayerItem",
+                              @"initWithAsset:",
+                              (IMP)YTKACEPlayerItemInitWithAsset,
+                              &OriginalPlayerItemInitWithAsset);
+
+    NSArray<NSString *> *hamClasses = @[
+        @"HAMPlayer",
+        @"HAMPlayerItem",
+        @"MLHAMPlayerItem",
+        @"HAMPlayerInternal",
+        @"HAMBuffer"
+    ];
+    NSArray<NSString *> *hamBufferGetters = @[
+        @"preferredForwardBufferDuration",
+        @"forwardBufferDuration",
+        @"bufferDuration",
+        @"maxBufferDuration",
+        @"minBufferDuration",
+        @"rebufferDuration"
+    ];
+    for (NSString *hamCls in hamClasses) {
+        if (NSClassFromString(hamCls) == Nil) continue;
+        for (NSString *getter in hamBufferGetters) {
+            IMP orig = NULL;
+            if (YTKACEInstallInstanceHook(hamCls, getter, (IMP)YTKACEHAMBufferDuration, &orig)) {
+                YTKACEStoreStreamingOriginal(hamCls, getter, orig);
+            }
+        }
+        for (NSString *setter in @[@"setPreferredForwardBufferDuration:", @"setForwardBufferDuration:", @"setMaxBufferDuration:"]) {
+            IMP orig = NULL;
+            if (YTKACEInstallInstanceHook(hamCls, setter, (IMP)YTKACEHAMSetBufferDuration, &orig)) {
+                YTKACEStoreStreamingOriginal(hamCls, setter, orig);
+            }
+        }
+    }
 }

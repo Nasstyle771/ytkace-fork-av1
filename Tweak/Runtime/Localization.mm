@@ -73,21 +73,46 @@ static NSDictionary<NSString *, NSString *> *YTKACEStringsForLanguage(NSString *
     return [NSDictionary dictionaryWithContentsOfFile:path];
 }
 
-static NSDictionary<NSString *, NSString *> *YTKACEActiveStrings;
-static NSString *YTKACEActiveLanguage;
+#include <os/lock.h>
+
+static os_unfair_lock s_locLock = OS_UNFAIR_LOCK_INIT;
+static NSDictionary<NSString *, NSString *> *YTKACEActiveStrings = nil;
+static NSDictionary<NSString *, NSString *> *s_englishStrings = nil;
+static NSString *YTKACEActiveLanguage = nil;
 
 void YTKACEResetLocalizationCache(void) {
+    os_unfair_lock_lock(&s_locLock);
     YTKACEActiveStrings = nil;
     YTKACEActiveLanguage = nil;
+    os_unfair_lock_unlock(&s_locLock);
 }
 
 NSString *YTKACELocalized(NSString *key) {
     if (key.length == 0) return key;
+
     NSString *language = YTKACEPreferredLanguage();
-    if (![language isEqualToString:YTKACEActiveLanguage]) {
-        YTKACEActiveLanguage = language;
+    NSDictionary<NSString *, NSString *> *strings = nil;
+    NSDictionary<NSString *, NSString *> *fallbackStrings = nil;
+
+    os_unfair_lock_lock(&s_locLock);
+    if (![language isEqualToString:YTKACEActiveLanguage] || YTKACEActiveStrings == nil) {
+        YTKACEActiveLanguage = [language copy];
         YTKACEActiveStrings = YTKACEStringsForLanguage(language);
     }
-    NSString *value = YTKACEActiveStrings[key];
-    return value.length != 0 ? value : key;
+    strings = YTKACEActiveStrings;
+    if (s_englishStrings == nil) {
+        s_englishStrings = YTKACEStringsForLanguage(@"en");
+    }
+    fallbackStrings = s_englishStrings;
+    os_unfair_lock_unlock(&s_locLock);
+
+    NSString *value = strings ? strings[key] : nil;
+    if (value.length != 0) return value;
+
+    if (fallbackStrings != nil && fallbackStrings != strings) {
+        NSString *fallback = fallbackStrings[key];
+        if (fallback.length != 0) return fallback;
+    }
+
+    return key;
 }
