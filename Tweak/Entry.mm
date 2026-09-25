@@ -2,6 +2,7 @@
 #import "Features/Downloads/SABRDownloader.h"
 #import "Features/Downloads/DownloadLog.h"
 #import "Features/SponsorBlock/DeArrow.h"
+#import "Features/Appearance/DisplayRateHooks.h"
 #import "Runtime/Preferences.h"
 
 #import <UIKit/UIKit.h>
