@@ -22,11 +22,16 @@ static id YTKACEPinchSend(id receiver, NSString *name) {
 }
 
 static id YTKACEAppViewController(void) {
+    static SEL hidePivotBarSel;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        hidePivotBarSel = @selector(hidePivotBar);
+    });
     for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
         if (![scene isKindOfClass:UIWindowScene.class]) continue;
         for (UIWindow *window in ((UIWindowScene *)scene).windows) {
             UIViewController *root = window.rootViewController;
-            if ([root respondsToSelector:NSSelectorFromString(@"hidePivotBar")]) {
+            if ([root respondsToSelector:hidePivotBarSel]) {
                 return root;
             }
         }

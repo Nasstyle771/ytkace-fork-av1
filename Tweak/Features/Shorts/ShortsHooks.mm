@@ -29,7 +29,7 @@ static const void *YTKACEShortsInitialRefreshAssociation =
 static NSInteger const YTKACEShortsDownloadTag = 0x59544B44;
 static double YTKACELastShortsTime;
 static double YTKACELastShortsDuration;
-static id YTKACELatestShortsPlayerResponse;
+static __weak id YTKACELatestShortsPlayerResponse;
 
 static void YTKACEReelLayout(UIView *receiver, SEL selector);
 static void YTKACEReelOverlayLayout(UIView *receiver, SEL selector);

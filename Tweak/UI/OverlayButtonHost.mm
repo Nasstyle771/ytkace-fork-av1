@@ -19,6 +19,30 @@ static const void *YTKACEOverlayAlignmentAssociation = &YTKACEOverlayAlignmentAs
 static NSMutableArray<NSDictionary *> *YTKACEOverlayConfigurators;
 static BOOL YTKACENativeControlsVisible = YES;
 
+static inline BOOL YTKACEIsSettingsControlHint(UIView *view) {
+    NSString *ident = view.accessibilityIdentifier;
+    if (ident != nil) {
+        if ([ident rangeOfString:@"settings" options:NSCaseInsensitiveSearch].location != NSNotFound ||
+            [ident rangeOfString:@"gear" options:NSCaseInsensitiveSearch].location != NSNotFound) {
+            return YES;
+        }
+    }
+    NSString *label = view.accessibilityLabel;
+    if (label != nil) {
+        if ([label rangeOfString:@"settings" options:NSCaseInsensitiveSearch].location != NSNotFound ||
+            [label rangeOfString:@"gear" options:NSCaseInsensitiveSearch].location != NSNotFound) {
+            return YES;
+        }
+    }
+    const char *cls = class_getName(view.class);
+    if (cls != NULL) {
+        if (strcasestr(cls, "settings") != NULL || strcasestr(cls, "gear") != NULL) {
+            return YES;
+        }
+    }
+    return NO;
+}
+
 static void YTKACEFindSettingsControlInView(UIView *view,
                                             UIView *excluded,
                                             UIView *coordinateView,
@@ -28,12 +52,9 @@ static void YTKACEFindSettingsControlInView(UIView *view,
         view.hidden || view.alpha < 0.05) {
         return;
     }
-    NSString *hint = [[NSString stringWithFormat:@"%@ %@ %@",
-        view.accessibilityIdentifier ?: @"", view.accessibilityLabel ?: @"",
-        NSStringFromClass(view.class)] lowercaseString];
     if (([view isKindOfClass:UIControl.class] ||
          [view isKindOfClass:UIImageView.class]) &&
-        ([hint containsString:@"settings"] || [hint containsString:@"gear"]) &&
+        YTKACEIsSettingsControlHint(view) &&
         !CGRectIsEmpty(view.bounds)) {
         CGRect frame = [view convertRect:view.bounds toView:coordinateView];
         CGFloat width = CGRectGetWidth(coordinateView.bounds);
@@ -68,7 +89,11 @@ static BOOL YTKACEIsTopTrailingControl(UIView *view, UIView *overlay) {
 }
 
 static UIView *YTKACEOverflowControl(UIView *overlay) {
-    SEL selector = NSSelectorFromString(@"overflowButton");
+    static SEL selector;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        selector = @selector(overflowButton);
+    });
     if (![overlay respondsToSelector:selector]) return nil;
     UIView *button = ((id (*)(id, SEL))objc_msgSend)(overlay, selector);
     if (![button isKindOfClass:UIView.class] || button.hidden ||

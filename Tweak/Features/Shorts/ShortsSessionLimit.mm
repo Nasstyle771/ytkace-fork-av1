@@ -29,7 +29,11 @@ BOOL YTKACEShortsLimitReached(void) {
 static UIViewController *YTKACEReelRootController(UIViewController *controller,
                                                   NSUInteger depth) {
     if (controller == nil || depth > 6) return nil;
-    SEL active = NSSelectorFromString(@"activeReelPlaybackVideoID");
+    static SEL active;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        active = @selector(activeReelPlaybackVideoID);
+    });
     if ([controller respondsToSelector:active]) return controller;
     for (UIViewController *child in controller.childViewControllers) {
         UIViewController *found = YTKACEReelRootController(child, depth + 1);
